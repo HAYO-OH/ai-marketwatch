@@ -1,10 +1,27 @@
 import json
+import re
 
-from groq import Groq
+import anthropic
 
 from config.settings import settings
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "claude-haiku-4-5-20251001"
+
+_SENTIMENT_SYSTEM = """당신은 한국 주식시장 뉴스 감성 분석 전문가입니다.
+뉴스 기사 목록을 보고 투자자 관점에서 해당 기업에 대한 감성 점수를 매기세요.
+
+## 감성 점수 기준 (-5 ~ +5 정수)
++5: 매우 긍정 — 대규모 계약, 어닝 서프라이즈, 신기술 성과
++3: 긍정 — 실적 개선, 신사업 진출, 파트너십
++1: 약간 긍정 — 소폭 성장, 긍정적 전망
+ 0: 중립 — 단순 사실 보도, 영향 불분명
+-1: 약간 부정 — 소폭 하락, 우려 표명
+-3: 부정 — 실적 하락, 소송, 규제 리스크
+-5: 매우 부정 — 대규모 손실, 스캔들, 상장폐지 위험
+
+## 출력 형식
+반드시 JSON 배열만 반환하세요. 날짜는 출력하지 마세요. index·score·headline만 반환합니다.
+[{"index": 0, "score": 정수, "headline": "핵심 내용 15자 이내"}]"""
 
 _CLASSIFY_SYSTEM = """당신은 한국 주식시장 공시 분류 전문가입니다.
 공시 제목을 보고 아래 7개 카테고리 중 하나로 반드시 분류하고 중요도를 점수화합니다.
@@ -88,34 +105,81 @@ _CLASSIFY_SYSTEM = """당신은 한국 주식시장 공시 분류 전문가입�
 ]"""
 
 
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    return match.group(1) if match else text
+
+
 class ClaudeClient:
     def __init__(self):
-        self._client = Groq(api_key=settings.groq_api_key)
+        self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     def analyze(self, system_prompt: str, user_message: str) -> str:
-        response = self._client.chat.completions.create(
+        response = self._client.messages.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            max_tokens=2048,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_message}],
         )
-        return response.choices[0].message.content
+        return response.content[0].text
 
-    def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
-        """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]"""
+    def _classify_batch(self, corp_name: str, items: list[dict], offset: int) -> list[dict]:
+        """items 배치 하나를 분류. index는 offset 기준으로 반환."""
         disclosure_text = "\n".join(
-            f"{i}. [{it['rcept_dt']}] {it['report_nm']}"
+            f"{offset + i}. [{it['rcept_dt']}] {it['report_nm']}"
             for i, it in enumerate(items)
         )
-        response = self._client.chat.completions.create(
+        response = self._client.messages.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": _CLASSIFY_SYSTEM},
-                {"role": "user", "content": f"{corp_name} 공시 목록:\n{disclosure_text}"},
-            ],
-            response_format={"type": "json_object"},
+            max_tokens=8192,
+            system=[{"type": "text", "text": _CLASSIFY_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": f"{corp_name} 공시 목록:\n{disclosure_text}"}],
         )
-        raw = json.loads(response.choices[0].message.content)
-        # Groq json_object 모드는 최상위가 dict일 수 있으므로 배열 추출
+        raw = json.loads(_strip_code_fence(response.content[0].text))
         return raw if isinstance(raw, list) else next(iter(raw.values()))
+
+    def analyze_sentiment(self, corp_name: str, articles: list[dict]) -> list[dict]:
+        """뉴스 기사 감성 분석. 날짜는 Tavily 원본에서 가져와 병합."""
+        if not articles:
+            return []
+        article_text = "\n".join(
+            f"{i}. [{a.get('published_date', '날짜미상')}] {a['title']}\n   {a['content'][:200]}"
+            for i, a in enumerate(articles)
+        )
+        response = self._client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            timeout=60.0,
+            system=[{"type": "text", "text": _SENTIMENT_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": f"{corp_name} 뉴스:\n{article_text}"}],
+        )
+        try:
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            if not isinstance(raw, list):
+                return []
+            # 날짜를 Claude에게 맡기지 않고 Tavily 원본 published_date로 직접 병합
+            result = []
+            for item in raw:
+                idx = item.get("index")
+                if idx is not None and 0 <= idx < len(articles):
+                    date = articles[idx].get("published_date", "")
+                    if date:
+                        result.append({
+                            "date": date,
+                            "score": item.get("score", 0),
+                            "headline": item.get("headline", ""),
+                        })
+            return result
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return []
+
+    def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
+        """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]
+        50건씩 배치 처리하여 max_tokens 초과 방지."""
+        BATCH_SIZE = 50
+        results = []
+        for start in range(0, len(items), BATCH_SIZE):
+            batch = items[start : start + BATCH_SIZE]
+            results.extend(self._classify_batch(corp_name, batch, offset=start))
+        return results
