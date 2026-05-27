@@ -1,5 +1,5 @@
 import json
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import plotly.express as px
@@ -10,6 +10,10 @@ from services.dart_client import DartClient
 from services.tavily_client import TavilyClient
 
 st.set_page_config(page_title="DART 공시 모니터링", layout="wide")
+
+@st.cache_resource
+def _get_clients():
+    return DartClient(), ClaudeClient()
 
 # ── 헬퍼 ─────────────────────────────────────────────────
 def score_badge(score: int) -> str:
@@ -30,10 +34,24 @@ def score_label(score: int) -> str:
         return "보통"
     return "낮음"
 
-def _render_disclosure_card(row, show_corp: bool = False):
+def _display_summary(summary: dict):
+    if "error" in summary:
+        st.caption(f"⚠️ {summary['error']}")
+    else:
+        st.markdown(f"- **핵심 내용:** {summary.get('핵심내용', '')}")
+        st.markdown(f"- **투자자 관점:** {summary.get('투자자관점', '')}")
+        st.markdown(f"- **리스크/기회:** {summary.get('리스크기회', '')}")
+
+
+def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = False):
     badge = score_badge(row["중요도"])
     corp_prefix = f"[{row.get('기업명', '')}]  " if show_corp and row.get("기업명") else ""
-    with st.expander(f"{badge}  {corp_prefix}[{row['접수일']}] {row['보고서명']}"):
+    rcept_no = row.get("rcept_no", "")
+    sum_key = f"summary_{rcept_no}" if rcept_no else None
+    exp_key = f"exp_{rcept_no}" if rcept_no else None
+    is_expanded = bool(st.session_state.get(exp_key)) if exp_key else False
+
+    with st.expander(f"{badge}  {corp_prefix}[{row['접수일']}] {row['보고서명']}", expanded=is_expanded):
         meta = f"**카테고리:** {row['카테고리']}"
         if show_corp and row.get("기업명"):
             meta = f"**기업:** {row['기업명']}　|　" + meta
@@ -41,12 +59,36 @@ def _render_disclosure_card(row, show_corp: bool = False):
         st.markdown(f"**점수 이유:** {row['분류사유']}")
         link_col, btn_col = st.columns([1, 1])
         with link_col:
-            if row.get("rcept_no"):
-                dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={row['rcept_no']}"
+            if rcept_no:
+                dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
                 st.markdown(f"[DART 원문 보기 →]({dart_url})")
         with btn_col:
             if row["카테고리"] == "실적":
                 st.page_link("pages/2_실적발표요약.py", label="📊 실적 상세 분석 보기")
+
+        if with_summary and rcept_no and sum_key:
+            st.divider()
+            st.markdown("**📝 공시 원문 요약**")
+            if sum_key in st.session_state:
+                _display_summary(st.session_state[sum_key])
+            else:
+                if st.button("원문 요약 불러오기", key=f"btn_sum_{rcept_no}", use_container_width=False):
+                    if exp_key:
+                        st.session_state[exp_key] = True
+                    with st.spinner("DART 원문 분석 중..."):
+                        dart_c, claude_c = _get_clients()
+                        try:
+                            text = dart_c.get_document_text(rcept_no)
+                            if text:
+                                summary = claude_c.summarize_disclosure(
+                                    row.get("기업명", ""), row.get("보고서명", ""), text
+                                )
+                            else:
+                                summary = {"error": "원문을 가져올 수 없습니다."}
+                        except Exception as e:
+                            summary = {"error": str(e)[:100]}
+                    st.session_state[sum_key] = summary
+                    _display_summary(summary)
 
 # ── 사이드바 ──────────────────────────────────────────────
 with st.sidebar:
@@ -90,6 +132,17 @@ if "corp_keys" not in st.session_state:
     st.session_state.corp_counter = 1
 if "search_results" not in st.session_state:
     st.session_state.search_results = None
+if "selected_quarter" not in st.session_state:
+    st.session_state.selected_quarter = "2026 1Q"
+
+# ── 분기 정의 ─────────────────────────────────────────────
+_QUARTERS = {
+    "2026 1Q": (date(2026, 1, 1),  date(2026, 3, 31)),
+    "2025 4Q": (date(2025, 10, 1), date(2025, 12, 31)),
+    "2025 3Q": (date(2025, 7, 1),  date(2025, 9, 30)),
+    "2025 2Q": (date(2025, 4, 1),  date(2025, 6, 30)),
+    "2025 1Q": (date(2025, 1, 1),  date(2025, 3, 31)),
+}
 
 # ── 메인: 검색 폼 ─────────────────────────────────────────
 st.title("📋 DART 공시 모니터링")
@@ -127,11 +180,35 @@ with center:
             st.rerun()
 
     st.markdown("##### 조회 기간")
-    d1, d2 = st.columns(2)
-    with d1:
-        bgn_de = st.date_input("시작일", value=date.today() - timedelta(days=90))
-    with d2:
-        end_de = st.date_input("종료일", value=date.today())
+
+    # 분기 선택 버튼
+    q_cols = st.columns(len(_QUARTERS))
+    for col, q_label in zip(q_cols, _QUARTERS):
+        with col:
+            is_sel = st.session_state.selected_quarter == q_label
+            if st.button(
+                q_label,
+                key=f"qbtn_{q_label.replace(' ', '')}",
+                type="primary" if is_sel else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.selected_quarter = q_label
+                st.session_state.manual_date_toggle = False
+                st.rerun()
+
+    # 직접 입력 토글
+    manual_mode = st.toggle("직접 입력", key="manual_date_toggle")
+    sel_start, sel_end = _QUARTERS[st.session_state.selected_quarter]
+
+    if manual_mode:
+        d1, d2 = st.columns(2)
+        with d1:
+            bgn_de = st.date_input("시작일", value=sel_start)
+        with d2:
+            end_de = st.date_input("종료일", value=sel_end)
+    else:
+        bgn_de, end_de = sel_start, sel_end
+        st.caption(f"📅 {bgn_de.strftime('%Y.%m.%d')} ~ {end_de.strftime('%Y.%m.%d')}")
 
     st.markdown("##### 최소 중요도")
     min_score = st.slider(
@@ -168,9 +245,13 @@ if search_btn:
     # ── Phase 1: DART 공시 조회 + AI 분류 ────────────────
     company_results = []
     n = len(corp_names)
-    progress_slot.progress(0, text="공시 조회 중...")
+    progress_slot.progress(0, text="시작 중...")
     for i, name in enumerate(corp_names):
-        progress_slot.progress(i / n / 2, text=f"{name} — 공시 조회 + AI 분류 중...")
+        # 1단계: 공시 수집
+        progress_slot.progress(
+            (2 * i) / (2 * n) * 0.5,
+            text=f"[{i+1}/{n}] {name} — 1단계: 공시 수집 중...",
+        )
 
         company = dart.search_company(name)
         if company is None:
@@ -191,6 +272,11 @@ if search_btn:
             })
             continue
 
+        # 2단계: AI 분류
+        progress_slot.progress(
+            (2 * i + 1) / (2 * n) * 0.5,
+            text=f"[{i+1}/{n}] {name} — 2단계: AI 분류 중... ({len(items)}건)",
+        )
         try:
             classifications = claude.classify_disclosures(corp_full_name, items)
             classify_map = {c["index"]: c for c in classifications}
@@ -232,18 +318,24 @@ if search_btn:
     for i, result in enumerate(found_results):
         corp = result["corp_name"]
 
-        # 뉴스 수집
+        # 3단계: 뉴스 수집
         p_fetch = 0.5 + (2 * i) / (2 * n_found) * 0.5
-        progress_slot.progress(p_fetch, text=f"[{i+1}/{n_found}] {corp} — 뉴스 수집 중...")
+        progress_slot.progress(
+            p_fetch,
+            text=f"[{i+1}/{n_found}] {corp} — 3단계: 뉴스 수집 중...",
+        )
         try:
             news_articles = tavily.get_news(corp, days=30, max_results=10)
         except Exception:
             news_articles = []
 
-        # 감성 분석
+        # 4단계: 감성 분석
         p_analyze = 0.5 + (2 * i + 1) / (2 * n_found) * 0.5
         if news_articles:
-            progress_slot.progress(p_analyze, text=f"[{i+1}/{n_found}] {corp} — 감성 분석 중 ({len(news_articles)}건)...")
+            progress_slot.progress(
+                p_analyze,
+                text=f"[{i+1}/{n_found}] {corp} — 4단계: 감성 분석 중... ({len(news_articles)}건)",
+            )
             try:
                 result["sentiment"] = claude.analyze_sentiment(corp, news_articles)
             except Exception:
@@ -252,7 +344,7 @@ if search_btn:
             progress_slot.progress(p_analyze, text=f"[{i+1}/{n_found}] {corp} — 뉴스 없음")
             result["sentiment"] = []
 
-    progress_slot.progress(1.0, text="완료!")
+    progress_slot.progress(1.0, text="✅ 완료!")
     progress_slot.empty()
 
     company_results.sort(key=lambda x: x["top_score"], reverse=True)
@@ -318,6 +410,8 @@ if alert_keywords and company_results:
         for corp, date, report_nm, kw in alerts:
             groups.setdefault((corp, kw), []).append((date, report_nm))
 
+        st.session_state.last_alert_count = len(groups)
+
         bullets = []
         for (corp, kw), items in groups.items():
             first_date, first_report = items[0]
@@ -327,6 +421,8 @@ if alert_keywords and company_results:
                 f"- **{corp}** — [{first_date}] {first_report}{suffix}에서 **'{kw}'** 감지"
             )
         st.error(f"⚠️ **키워드 알림**\n" + "\n".join(bullets))
+    else:
+        st.session_state.last_alert_count = 0
 
 # ── 탭 ───────────────────────────────────────────────────
 tab_list, tab_monitor, tab_chart, tab_sentiment, tab_alert = st.tabs([
@@ -343,6 +439,8 @@ with tab_list:
         if not result["all_rows"]:
             st.info(f"해당 기간 중요도 {min_score}점 이상 공시 없음")
             continue
+
+        # 요약 테이블 (전체 텍스트는 hover 시 툴팁으로 표시됨)
         df_corp = pd.DataFrame(result["all_rows"])
         df_corp["중요도표시"] = df_corp["중요도"].apply(score_badge)
         st.dataframe(
@@ -350,10 +448,18 @@ with tab_list:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "중요도표시": st.column_config.TextColumn("중요도", width="small"),
-                "분류사유": st.column_config.TextColumn("AI 분류 사유", width="large"),
+                "접수일":    st.column_config.TextColumn("접수일",   width=100),
+                "보고서명":  st.column_config.TextColumn("보고서명", width=200),
+                "카테고리":  st.column_config.TextColumn("카테고리", width=90),
+                "중요도표시": st.column_config.TextColumn("중요도",  width=70),
+                "분류사유":  st.column_config.TextColumn("AI 분류 사유"),
             },
         )
+
+        # 공시 카드 (원문 요약 on-demand)
+        with st.expander(f"📄 공시 카드 펼치기 ({len(result['all_rows'])}건)", expanded=False):
+            for row in result["all_rows"]:
+                _render_disclosure_card(row, with_summary=True)
 
 # ── Tab 2: 일괄 모니터링 ──────────────────────────────────
 with tab_monitor:

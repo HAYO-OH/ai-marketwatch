@@ -23,6 +23,17 @@ _SENTIMENT_SYSTEM = """당신은 한국 주식시장 뉴스 감성 분석 전문
 반드시 JSON 배열만 반환하세요. 날짜는 출력하지 마세요. index·score·headline만 반환합니다.
 [{"index": 0, "score": 정수, "headline": "핵심 내용 15자 이내"}]"""
 
+_SUMMARIZE_SYSTEM = """당신은 한국 주식시장 공시 분석 전문가입니다.
+공시 원문 텍스트를 읽고 투자자 관점에서 3줄로 요약하세요.
+
+## 출력 형식
+반드시 아래 JSON 객체만 반환하세요. 설명 없이 JSON만 출력합니다.
+{
+  "핵심내용": "핵심 내용 1줄 (30자 이내)",
+  "투자자관점": "투자자 관점에서 주목할 점 1줄 (30자 이내)",
+  "리스크기회": "리스크 또는 기회 요인 1줄 (30자 이내)"
+}"""
+
 _CLASSIFY_SYSTEM = """당신은 한국 주식시장 공시 분류 전문가입니다.
 공시 제목을 보고 아래 7개 카테고리 중 하나로 반드시 분류하고 중요도를 점수화합니다.
 
@@ -173,6 +184,22 @@ class ClaudeClient:
             return result
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
+
+    def summarize_disclosure(self, corp_name: str, report_name: str, text: str) -> dict:
+        """공시 원문 3줄 요약. {핵심내용, 투자자관점, 리스크기회} 반환."""
+        if not text:
+            return {"error": "원문 내용을 가져올 수 없습니다."}
+        response = self._client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=[{"type": "text", "text": _SUMMARIZE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": f"기업명: {corp_name}\n공시명: {report_name}\n\n원문:\n{text}"}],
+        )
+        try:
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, dict) else {"error": "응답 파싱 실패"}
+        except (json.JSONDecodeError, KeyError):
+            return {"error": "응답 파싱 실패"}
 
     def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
         """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]

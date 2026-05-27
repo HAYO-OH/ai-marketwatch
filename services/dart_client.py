@@ -1,4 +1,5 @@
 import io
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -222,3 +223,47 @@ class DartClient:
         )
         resp.raise_for_status()
         return resp.json().get("list", [])
+
+    def get_document_text(self, rcept_no: str, max_chars: int = 4000) -> str:
+        """공시 원문 ZIP에서 텍스트 추출.
+        DART는 ZIP 안에 {rcept_no}.xml 또는 .htm 파일을 제공함.
+        파일 크기 기준 가장 큰 파일을 본문으로 간주."""
+        resp = requests.get(
+            f"{BASE_URL}/document.xml",
+            params={"crtfc_key": self.api_key, "rcept_no": rcept_no},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        # 응답이 ZIP인지 확인 (에러 응답은 XML 텍스트로 옴)
+        if not resp.content[:4] == b"PK\x03\x04":
+            return ""
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            doc_infos = [
+                info for info in zf.infolist()
+                if info.filename.lower().endswith((".htm", ".html", ".xml"))
+                and not info.filename.lower().endswith("dart4.xsd")
+            ]
+            if not doc_infos:
+                return ""
+            doc_infos.sort(key=lambda x: x.file_size, reverse=True)
+            raw = zf.read(doc_infos[0].filename)
+
+        for enc in ("utf-8", "euc-kr", "cp949"):
+            try:
+                content = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            content = raw.decode("utf-8", errors="ignore")
+
+        # XML/HTML 태그 제거 후 텍스트 추출
+        content = re.sub(r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", content)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&[a-zA-Z#0-9]+;", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
