@@ -1,5 +1,6 @@
+import re
 import requests
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -92,27 +93,27 @@ def _fetch_price(ticker: str, event_date: str, window: int = 5) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def _fetch_peer_fundamentals(ticker_items: tuple) -> pd.DataFrame:
-    """(종목명, ticker) 튜플 기반 동종업계 PER/PBR/시가총액 조회."""
+def _fetch_peer_performance(ticker_items: tuple, today_str: str) -> pd.DataFrame:
+    """(종목명, ticker, is_current) 튜플 기반 현재가·1M·3M 수익률 조회.
+    get_market_ohlcv_by_date 만 사용 — KRX 인증 불필요."""
     try:
-        from pykrx import stock as krx  # noqa: PLC0415
-        today_str = date.today().strftime("%Y%m%d")
-        cap_df = krx.get_market_cap_by_ticker(today_str, market="ALL")
+        from pykrx import stock as krx
+        today = date(int(today_str[:4]), int(today_str[4:6]), int(today_str[6:]))
+        start = (today - timedelta(days=110)).strftime("%Y%m%d")  # 3개월+여유
         rows = []
-        for name, ticker in ticker_items:
+        for name, ticker, is_current in ticker_items:
             try:
-                fund = krx.get_market_fundamental(today_str, today_str, ticker)
-                if fund.empty:
-                    per = pbr = None
+                df = krx.get_market_ohlcv_by_date(start, today_str, ticker)
+                if df.empty:
+                    cur = ret_1m = ret_3m = None
                 else:
-                    pv = fund["PER"].iloc[-1]
-                    bv = fund["PBR"].iloc[-1]
-                    per = round(float(pv), 1) if pv > 0 else None
-                    pbr = round(float(bv), 2) if bv > 0 else None
+                    cur = int(df["종가"].iloc[-1])
+                    ret_1m = round((cur / df["종가"].iloc[-22] - 1) * 100, 1) if len(df) >= 22 else None
+                    ret_3m = round((cur / df["종가"].iloc[-64] - 1) * 100, 1) if len(df) >= 64 else None
             except Exception:
-                per = pbr = None
-            cap = int(cap_df.loc[ticker, "시가총액"]) if ticker in cap_df.index else None
-            rows.append({"종목명": name, "ticker": ticker, "시가총액": cap, "PER": per, "PBR": pbr})
+                cur = ret_1m = ret_3m = None
+            rows.append({"종목명": name, "ticker": ticker,
+                         "현재가": cur, "1M수익률": ret_1m, "3M수익률": ret_3m, "is_current": is_current})
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
@@ -146,6 +147,62 @@ def _fetch_earnings_calendar(bgn_de: str, end_de: str, dart_api_key: str) -> pd.
     return df[["rcept_dt", "corp_name", "report_nm", "rcept_no"]].sort_values("rcept_dt")
 
 
+@st.cache_data(ttl=3600)
+def _fetch_kind_ir_calendar(bgn_de: str, end_de: str) -> pd.DataFrame:
+    """KIND IR 발표 예정 일정 수집 → DataFrame[date: date, corp: str]
+    KIND 세션 쿠키 방식 AJAX POST 파싱."""
+    bgn = datetime.strptime(bgn_de, "%Y%m%d").date()
+    end = datetime.strptime(end_de, "%Y%m%d").date()
+    # 필요한 (year, month) 집합
+    months: set = set()
+    cur = bgn.replace(day=1)
+    while cur <= end:
+        months.add((cur.year, cur.month))
+        cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+    try:
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+            "Referer": "https://kind.krx.co.kr/corpgeneral/irschedule.do?method=searchIRScheduleMain&gubun=iRScheduleCalendar",
+        })
+        base = "https://kind.krx.co.kr/corpgeneral/irschedule.do"
+        sess.get(base, params={"method": "searchIRScheduleMain", "gubun": "iRScheduleCalendar"}, timeout=15)
+        rows = []
+        seen: set = set()
+        for year, month in sorted(months):
+            resp = sess.post(base, data={
+                "method": "searchIRScheduleCalendar",
+                "selYear": str(year), "selMonth": f"{month:02d}",
+                "currentPageSize": "100", "pageIndex": "1",
+            }, timeout=15)
+            td_blocks = re.findall(r"<td[^>]*>(.*?)</td>", resp.text, re.DOTALL)
+            for block in td_blocks:
+                clean = re.sub(r"<[^>]+>", " ", block)
+                day_m = re.search(r"^\s*(\d{1,2})\b", clean.strip())
+                if not day_m:
+                    continue
+                day = int(day_m.group(1))
+                if not 1 <= day <= 31:
+                    continue
+                titles = re.findall(r'title="([^"]{2,30})"', block)
+                corps = [t for t in titles if re.search("[가-힣]", t) and "더보기" not in t]
+                try:
+                    evt_date = date(year, month, day)
+                except ValueError:
+                    continue
+                if evt_date < bgn or evt_date > end:
+                    continue
+                for corp in corps:
+                    key = (evt_date, corp)
+                    if key not in seen:
+                        seen.add(key)
+                        rows.append({"date": evt_date, "corp": corp})
+        return pd.DataFrame(rows).sort_values("date").reset_index(drop=True) if rows else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
 # ── 렌더링 헬퍼 ───────────────────────────────────────────
 
 def _surprise_ui(surprise: str) -> tuple[str, str]:
@@ -164,40 +221,48 @@ def _render_peer_comparison(peer_df: pd.DataFrame, current_corp: str):
         st.info("동종업계 비교 데이터를 가져올 수 없습니다.")
         return
     df = peer_df.copy()
-    df[""] = df["종목명"].apply(lambda x: "◀ 현재" if x == current_corp else "")
+    df[""] = df["is_current"].apply(lambda x: "◀ 현재" if x else "") if "is_current" in df.columns \
+        else df["종목명"].apply(lambda x: "◀ 현재" if x == current_corp else "")
 
-    def _fmt_cap(v):
-        if v and isinstance(v, (int, float)) and v > 0:
-            return f"{v / 1e12:.1f}조"
-        return "—"
+    def _fmt_ret(v):
+        if v is None:
+            return "N/A"
+        return f"+{v:.1f}%" if v >= 0 else f"{v:.1f}%"
 
-    df["시가총액"] = df["시가총액"].apply(_fmt_cap)
-    df["PER"] = df["PER"].apply(lambda x: f"{x:.1f}x" if x else "—")
-    df["PBR"] = df["PBR"].apply(lambda x: f"{x:.2f}x" if x else "—")
+    df["현재가"] = df["현재가"].apply(lambda v: f"{v:,}원" if v else "N/A")
+    df["1M수익률"] = df["1M수익률"].apply(_fmt_ret)
+    df["3M수익률"] = df["3M수익률"].apply(_fmt_ret)
     st.dataframe(
-        df[["", "종목명", "시가총액", "PER", "PBR"]],
+        df[["", "종목명", "현재가", "1M수익률", "3M수익률"]],
         hide_index=True,
         use_container_width=True,
         column_config={
-            "":       st.column_config.TextColumn("", width=75),
-            "종목명": st.column_config.TextColumn("종목명", width=140),
-            "시가총액": st.column_config.TextColumn("시가총액", width=100),
-            "PER":    st.column_config.TextColumn("PER", width=80),
-            "PBR":    st.column_config.TextColumn("PBR", width=80),
+            "":         st.column_config.TextColumn("", width=75),
+            "종목명":   st.column_config.TextColumn("종목명", width=140),
+            "현재가":   st.column_config.TextColumn("현재가", width=100),
+            "1M수익률": st.column_config.TextColumn("1M 수익률", width=90),
+            "3M수익률": st.column_config.TextColumn("3M 수익률", width=90),
         },
     )
-    st.caption("데이터 기준: pykrx(KRX) 오늘 종가 · PER/PBR 음수는 N/A 처리")
+    st.caption("데이터 기준: KRX 종가 · 1M=21거래일, 3M=63거래일 수익률")
 
 
-def _render_earnings_calendar(cal_df: pd.DataFrame, analyzed_corp: str):
+def _render_earnings_calendar(cal_df: pd.DataFrame, kind_df: pd.DataFrame, analyzed_corp: str):
     st.markdown("#### 📅 실적 공시 캘린더")
+    # 범례
+    st.markdown(
+        "<div style='font-size:0.79rem;color:#555;margin-bottom:4px'>"
+        "<span style='color:#333;font-weight:bold'>●</span> 공시 완료 (DART)&nbsp;&nbsp;"
+        "<span style='color:#1E88E5;font-weight:bold'>◆</span> IR 발표 예정 (KIND)</div>",
+        unsafe_allow_html=True,
+    )
+
     today = date.today()
-    # 3주 윈도우: 지난주 월요일 ~ 다음다음주 일요일
     start_mon = today - timedelta(days=today.weekday() + 7)
     all_days = [start_mon + timedelta(days=i) for i in range(21)]
-
-    # date → 공시 목록 매핑
     visible = set(all_days)
+
+    # DART 공시 맵
     cal_map: dict[date, list[dict]] = {}
     if not cal_df.empty:
         for _, row in cal_df.iterrows():
@@ -208,6 +273,14 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, analyzed_corp: str):
                     "report": row["report_nm"],
                     "rcept_no": row["rcept_no"],
                 })
+
+    # KIND IR 예정일 맵
+    kind_map: dict[date, list[str]] = {}
+    if not kind_df.empty:
+        for _, row in kind_df.iterrows():
+            d: date = row["date"]
+            if d in visible:
+                kind_map.setdefault(d, []).append(row["corp"])
 
     # 요일 헤더
     hdr = st.columns(7)
@@ -227,6 +300,7 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, analyzed_corp: str):
                 is_today = day == today
                 is_past = day < today
                 items = cal_map.get(day, [])
+                kind_items = kind_map.get(day, [])
                 bg = "#FF4B4B" if is_today else ("#f8f9fa" if is_past else "#ffffff")
                 fg = "white" if is_today else ("#aaa" if is_past else "#222")
                 border = "2px solid #FF4B4B" if is_today else "1px solid #e0e0e0"
@@ -238,6 +312,7 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, analyzed_corp: str):
                     f"{day.strftime('%m/%d')}</span></div>",
                     unsafe_allow_html=True,
                 )
+                # ● DART 공시 완료
                 for item in items[:3]:
                     corp = item["corp"]
                     report_title = item["report"]
@@ -247,21 +322,43 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, analyzed_corp: str):
                     st.markdown(
                         f"<div style='font-size:0.71rem;color:{color};font-weight:{weight};"
                         f"padding:1px 2px;overflow:hidden;white-space:nowrap;"
-                        f"text-overflow:ellipsis;' title='{report_title}'>{corp}</div>",
+                        f"text-overflow:ellipsis;' title='{report_title}'>● {corp}</div>",
                         unsafe_allow_html=True,
                     )
                 if len(items) > 3:
                     st.markdown(
                         f"<div style='font-size:0.69rem;color:#aaa;padding:1px 2px'>"
-                        f"+{len(items)-3}건</div>",
+                        f"●+{len(items)-3}건</div>",
+                        unsafe_allow_html=True,
+                    )
+                # ◆ KIND IR 발표 예정
+                for corp in kind_items[:2]:
+                    is_current = corp == analyzed_corp
+                    color = "#FF4B4B" if is_current else "#1E88E5"
+                    weight = "bold" if is_current else "normal"
+                    st.markdown(
+                        f"<div style='font-size:0.71rem;color:{color};font-weight:{weight};"
+                        f"padding:1px 2px;overflow:hidden;white-space:nowrap;"
+                        f"text-overflow:ellipsis;'>◆ {corp}</div>",
+                        unsafe_allow_html=True,
+                    )
+                if len(kind_items) > 2:
+                    st.markdown(
+                        f"<div style='font-size:0.69rem;color:#1E88E5;padding:1px 2px'>"
+                        f"◆+{len(kind_items)-2}건</div>",
                         unsafe_allow_html=True,
                     )
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-    if cal_df.empty:
-        st.info("해당 기간 수집된 실적 공시가 없습니다. (DART 정기공시 기준)")
+    notes = []
+    if not cal_df.empty:
+        notes.append("DART 정기공시")
+    if not kind_df.empty:
+        notes.append("KIND IR 발표 예정")
+    if not notes:
+        st.info("해당 기간 수집된 실적 공시가 없습니다.")
     else:
-        note = f"※ DART 정기공시(분기·반기·사업보고서, 잠정실적) 기준 · 오늘({today.strftime('%Y.%m.%d')}) 기준 ±3주"
+        note = f"※ {' · '.join(notes)} · 오늘({today.strftime('%Y.%m.%d')}) 기준 ±3주"
         if analyzed_corp:
             note += f" · 빨간 글씨: {analyzed_corp}"
         st.caption(note)
@@ -454,10 +551,19 @@ if st.session_state.get("earnings_result"):
             hovertemplate="%{x|%Y.%m.%d}<br>종가: %{y:,}원<extra></extra>",
         ))
         if event_ts is not None:
-            fig.add_vline(
-                x=event_ts, line_dash="dash", line_color="crimson", opacity=0.75,
-                annotation_text="📋 실적 발표", annotation_position="top right",
-                annotation_font_color="crimson",
+            x_date = str(event_ts)[:10]
+            fig.add_shape(
+                type="line",
+                x0=x_date, x1=x_date,
+                y0=0, y1=1,
+                xref="x", yref="paper",
+                line=dict(color="crimson", width=2, dash="dash"),
+            )
+            fig.add_annotation(
+                x=x_date, y=1, xref="x", yref="paper",
+                text="📋 실적 발표", showarrow=False,
+                xanchor="left", yanchor="top",
+                font=dict(color="crimson"),
             )
         fig.update_layout(
             title=f"{corp_full_name} {quarter} 실적 발표 전후 ±5 거래일",
@@ -472,24 +578,24 @@ if st.session_state.get("earnings_result"):
             "</p>", unsafe_allow_html=True,
         )
 
-    # ── 경쟁사 비교 ──────────────────────────────────────
+    # ── 동종업계 비교 ────────────────────────────────────────────────────────────────────
+    st.divider()
     peers = _PEER_GROUPS.get(corp_full_name, [])
-    if peers:
-        st.divider()
+    if r["stock_code"] and peers:
         dart_c, _ = _get_clients()
-        ticker_map: dict[str, str] = {}
-        if r["stock_code"]:
-            ticker_map[corp_full_name] = r["stock_code"]
+        ticker_items_list = [(corp_full_name, r["stock_code"], True)]
         for p in peers[:4]:
             tc = dart_c.get_stock_code(p)
             if tc:
-                ticker_map[p] = tc
-        if len(ticker_map) > 1:
-            with st.spinner("동종업계 데이터 조회 중... (pykrx)"):
-                peer_df = _fetch_peer_fundamentals(tuple(sorted(ticker_map.items())))
+                ticker_items_list.append((p, tc, False))
+        if len(ticker_items_list) > 1:
+            with st.spinner("동종업계 주가 데이터 조회 중..."):
+                peer_df = _fetch_peer_performance(tuple(ticker_items_list), date.today().strftime("%Y%m%d"))
             _render_peer_comparison(peer_df, corp_full_name)
         else:
             st.info("동종업계 종목코드를 찾을 수 없습니다.")
+    elif not r["stock_code"]:
+        st.info("상장 종목이 아니거나 종목코드를 찾을 수 없습니다.")
 
     # 수집된 공시 목록
     if r["earnings_items"]:
@@ -508,4 +614,5 @@ _end_cal = (_today + timedelta(days=14)).strftime("%Y%m%d")
 _analyzed_corp = (st.session_state.get("earnings_result") or {}).get("corp_name", "")
 with st.spinner("실적 캘린더 로딩 중..."):
     _cal_df = _fetch_earnings_calendar(_bgn_cal, _end_cal, settings.dart_api_key)
-_render_earnings_calendar(_cal_df, _analyzed_corp)
+    _kind_df = _fetch_kind_ir_calendar(_bgn_cal, _end_cal)
+_render_earnings_calendar(_cal_df, _kind_df, _analyzed_corp)
