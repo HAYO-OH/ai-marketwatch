@@ -23,6 +23,33 @@ _SENTIMENT_SYSTEM = """당신은 한국 주식시장 뉴스 감성 분석 전문
 반드시 JSON 배열만 반환하세요. 날짜는 출력하지 마세요. index·score·headline만 반환합니다.
 [{"index": 0, "score": 정수, "headline": "핵심 내용 15자 이내"}]"""
 
+_EARNINGS_ANALYSIS_SYSTEM = """당신은 한국 주식시장 실적 분석 전문가입니다.
+공시 원문을 읽고 투자자 관점에서 실적을 분석하세요.
+원문이 없거나 정보가 불충분하면 공시명과 분기 정보로 추론 가능한 수준으로 작성하세요.
+
+## 어닝 서프라이즈 판단 기준
+- BEAT: 영업이익/매출이 전분기 또는 전년 동기 대비 시장 예상을 크게 상회, 또는 긍정적 서프라이즈 언급
+- MISS: 영업이익/매출이 예상치 하회, 어닝 쇼크 또는 급감 언급
+- IN_LINE: 예상치 부합, 소폭 증감
+- UNKNOWN: 비교 기준 불명확하거나 원문 정보 부족
+
+## 출력 형식
+반드시 아래 JSON 객체만 반환하세요. 설명 없이 JSON만 출력합니다.
+{
+  "earnings_surprise": "BEAT" | "MISS" | "IN_LINE" | "UNKNOWN",
+  "surprise_reason": "판단 근거 30자 이내",
+  "key_metrics": [
+    {"항목": "매출액", "값": "숫자+단위", "전분기대비": "+N%" 또는 "-N%" 또는 "해당없음"}
+  ],
+  "key_changes": ["변화1 30자 이내", "변화2 30자 이내", "변화3 30자 이내"],
+  "guidance": "가이던스 요약 50자 이내. 없으면 '명시된 가이던스 없음'",
+  "risks": ["리스크1 30자 이내", "리스크2 30자 이내", "리스크3 30자 이내"]
+}
+
+## key_metrics 규칙
+원문에서 찾을 수 있는 핵심 수치 최대 5개. 없으면 빈 배열.
+항목 예시: 매출액, 영업이익, 당기순이익, 영업이익률, 부채비율, ROE"""
+
 _SUMMARIZE_SYSTEM = """당신은 한국 주식시장 공시 분석 전문가입니다.
 공시 원문 텍스트를 읽고 투자자 관점에서 3줄로 요약하세요.
 
@@ -200,6 +227,28 @@ class ClaudeClient:
             return raw if isinstance(raw, dict) else {"error": "응답 파싱 실패"}
         except (json.JSONDecodeError, KeyError):
             return {"error": "응답 파싱 실패"}
+
+    def analyze_earnings(self, corp_name: str, quarter: str, report_name: str, text: str) -> dict:
+        """실적 공시 분석. {earnings_surprise, surprise_reason, key_metrics, key_changes, guidance, risks} 반환."""
+        _FALLBACK = {
+            "earnings_surprise": "UNKNOWN", "surprise_reason": "분석 실패",
+            "key_metrics": [], "key_changes": [], "guidance": "정보 없음", "risks": [],
+        }
+        if text:
+            user_msg = f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}\n\n원문:\n{text}"
+        else:
+            user_msg = f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}\n\n원문 없음 — 공시명 기반으로 추론"
+        response = self._client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=[{"type": "text", "text": _EARNINGS_ANALYSIS_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        try:
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, dict) else _FALLBACK
+        except (json.JSONDecodeError, KeyError):
+            return _FALLBACK
 
     def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
         """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]

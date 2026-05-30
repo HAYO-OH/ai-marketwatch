@@ -11,6 +11,7 @@ BASE_URL = "https://opendart.fss.or.kr/api"
 
 # corpCode.xml은 자주 바뀌지 않으므로 프로세스 수명 동안 메모리에 캐시
 _corp_code_cache: dict[str, str] | None = None
+_stock_code_cache: dict[str, str] | None = None
 
 # 영문 입력 → 한글 기업명 매핑 (소문자 기준, 공백 제거 포함)
 _EN_TO_KO: dict[str, str] = {
@@ -152,7 +153,7 @@ class DartClient:
 
     def _get_corp_codes(self) -> dict[str, str]:
         """기업명 → corp_code 딕셔너리. 최초 1회만 DART에서 다운로드."""
-        global _corp_code_cache
+        global _corp_code_cache, _stock_code_cache
         if _corp_code_cache is not None:
             return _corp_code_cache
 
@@ -167,12 +168,32 @@ class DartClient:
             xml_data = zf.read("CORPCODE.xml")
 
         root = ET.fromstring(xml_data)
-        _corp_code_cache = {
-            item.findtext("corp_name"): item.findtext("corp_code")
-            for item in root.findall("list")
-            if item.findtext("corp_name")
-        }
+        _corp_code_cache = {}
+        _stock_code_cache = {}
+        for item in root.findall("list"):
+            name = item.findtext("corp_name")
+            if not name:
+                continue
+            _corp_code_cache[name] = item.findtext("corp_code")
+            sc = (item.findtext("stock_code") or "").strip()
+            if sc:
+                _stock_code_cache[name] = sc
         return _corp_code_cache
+
+    def get_stock_code(self, corp_name: str) -> str | None:
+        """기업명으로 KRX 종목코드 조회. 미상장이면 None."""
+        self._get_corp_codes()
+        global _stock_code_cache
+        if _stock_code_cache is None:
+            return None
+        code = _stock_code_cache.get(corp_name)
+        if code:
+            return code
+        query_lower = corp_name.lower()
+        for name, sc in _stock_code_cache.items():
+            if query_lower in name.lower() or name.lower() in query_lower:
+                return sc
+        return None
 
     def _resolve_name(self, query: str) -> str:
         """영문 입력을 한글 기업명으로 변환. 이미 한글이면 그대로 반환."""
@@ -220,6 +241,22 @@ class DartClient:
                 "page_count": page_count,
             },
             timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("list", [])
+
+    def get_all_disclosures(self, bgn_de: str, end_de: str, pblntf_ty: str = "A", page_count: int = 100) -> list[dict]:
+        """corp_code 없이 전체 기업 공시 목록 반환 (실적 캘린더용)."""
+        resp = requests.get(
+            f"{BASE_URL}/list.json",
+            params={
+                "crtfc_key": self.api_key,
+                "bgn_de": bgn_de,
+                "end_de": end_de,
+                "pblntf_ty": pblntf_ty,
+                "page_count": page_count,
+            },
+            timeout=15,
         )
         resp.raise_for_status()
         return resp.json().get("list", [])
