@@ -8,6 +8,7 @@ import streamlit as st
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
 from services.tavily_client import TavilyClient
+from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="DART 공시 모니터링", layout="wide")
 
@@ -43,7 +44,7 @@ def _display_summary(summary: dict):
         st.markdown(f"- **리스크/기회:** {summary.get('리스크기회', '')}")
 
 
-def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = False):
+def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = False, _tab_ctx: str = ""):
     badge = score_badge(row["중요도"])
     corp_prefix = f"[{row.get('기업명', '')}]  " if show_corp and row.get("기업명") else ""
     rcept_no = row.get("rcept_no", "")
@@ -57,7 +58,7 @@ def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = F
             meta = f"**기업:** {row['기업명']}　|　" + meta
         st.markdown(meta)
         st.markdown(f"**점수 이유:** {row['분류사유']}")
-        link_col, btn_col = st.columns([1, 1])
+        link_col, btn_col, chart_col = st.columns([2, 2, 2])
         with link_col:
             if rcept_no:
                 dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
@@ -65,6 +66,17 @@ def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = F
         with btn_col:
             if row["카테고리"] == "실적":
                 st.page_link("pages/2_실적발표요약.py", label="📊 실적 상세 분석 보기")
+        with chart_col:
+            corp = row.get("기업명", "")
+            if corp:
+                _ckey = (
+                    f"btn_chart_{_tab_ctx}_{rcept_no}"
+                    if rcept_no
+                    else f"btn_chart_{_tab_ctx}_{abs(hash(corp + str(row.get('접수일', ''))))}"
+                )
+                if st.button("📈 주가 반응 보기", key=_ckey):
+                    st.session_state["selected_stock"] = corp
+                    st.switch_page("pages/2_실적발표요약.py")
 
         if with_summary and rcept_no and sum_key:
             st.divider()
@@ -89,6 +101,9 @@ def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = F
                             summary = {"error": str(e)[:100]}
                     st.session_state[sum_key] = summary
                     _display_summary(summary)
+
+# ── 관심 종목 사이드바 ────────────────────────────────────
+render_watchlist_sidebar()
 
 # ── 사이드바 ──────────────────────────────────────────────
 with st.sidebar:
@@ -151,6 +166,17 @@ st.markdown("<br>", unsafe_allow_html=True)
 _, center, _ = st.columns([1, 2, 1])
 with center:
     st.markdown("##### 관심 종목")
+
+    # 관심 종목 불러오기
+    _wl = st.session_state.get("watchlist", [])
+    if _wl and st.button("⭐ 관심 종목 불러오기", use_container_width=True, key="wl_load_corp"):
+        new_keys = list(range(len(_wl)))
+        st.session_state.corp_keys = new_keys
+        st.session_state.corp_counter = len(_wl)
+        for _i, _s in enumerate(_wl):
+            st.session_state[f"corp_input_{_i}"] = _s
+        st.rerun()
+
     for key_id in list(st.session_state.corp_keys):
         col_input, col_del = st.columns([5, 1])
         with col_input:
@@ -459,7 +485,7 @@ with tab_list:
         # 공시 카드 (원문 요약 on-demand)
         with st.expander(f"📄 공시 카드 펼치기 ({len(result['all_rows'])}건)", expanded=False):
             for row in result["all_rows"]:
-                _render_disclosure_card(row, with_summary=True)
+                _render_disclosure_card(row, with_summary=True, _tab_ctx="lst")
 
 # ── Tab 2: 일괄 모니터링 ──────────────────────────────────
 with tab_monitor:
@@ -487,7 +513,7 @@ with tab_monitor:
                 continue
 
             for disc in result["top3"]:
-                _render_disclosure_card(disc)
+                _render_disclosure_card(disc, _tab_ctx="mon")
 
 # ── Tab 3: 분석 차트 ──────────────────────────────────────
 with tab_chart:
@@ -637,11 +663,11 @@ with tab_alert:
                 high_rows = [r for r in rows if r["중요도"] >= 7]
                 if high_rows:
                     for row in high_rows:
-                        _render_disclosure_card(row)
+                        _render_disclosure_card(row, _tab_ctx="alt_h")
                 else:
                     st.success("이번 기간 고중요도 이벤트 없음 ✅")
                     top3 = rows[:3]
                     if top3:
                         st.markdown("**점수 상위 공시**")
                         for row in top3:
-                            _render_disclosure_card(row)
+                            _render_disclosure_card(row, _tab_ctx="alt_t")

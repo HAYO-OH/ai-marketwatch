@@ -9,12 +9,19 @@ import streamlit as st
 from config.settings import settings
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
+from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="실적 발표 요약", layout="wide")
 
 @st.cache_resource
 def _get_clients():
     return DartClient(), ClaudeClient()
+
+# ── Tab 1 → Tab 2 선택 종목 자동 분석 ───────────────────
+if st.session_state.get("selected_stock"):
+    _incoming = st.session_state.pop("selected_stock")
+    st.session_state["earn_corp_input"] = _incoming
+    st.session_state["_auto_analyze"] = True
 
 # ── 분기 정의 (2024 1Q ~ 2026 1Q) ─────────────────────────
 _QUARTERS: dict[str, tuple[date, date]] = {
@@ -364,6 +371,25 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, kind_df: pd.DataFrame, analy
         st.caption(note)
 
 
+# ── 사이드바: 관심 종목 ───────────────────────────────────
+render_watchlist_sidebar()
+
+with st.sidebar:
+    _wl = st.session_state.get("watchlist", [])
+    if _wl:
+        st.subheader("빠른 분석")
+        _wl_sel = st.selectbox(
+            "관심 종목 선택",
+            options=["선택..."] + _wl,
+            key="wl_sel_tab2",
+            label_visibility="collapsed",
+        )
+        if _wl_sel != "선택..." and st.button("📊 이 종목 분석", key="wl_analyze_btn", use_container_width=True):
+            st.session_state["earn_corp_input"] = _wl_sel
+            st.session_state["_auto_analyze"] = True
+            st.rerun()
+        st.divider()
+
 # ── 메인: 입력 폼 (중앙 배치) ─────────────────────────────
 st.title("📊 실적 발표 요약")
 st.markdown("<br>", unsafe_allow_html=True)
@@ -393,7 +419,8 @@ with center:
 # ── 분석 실행 ─────────────────────────────────────────────
 progress_slot = st.empty()
 
-if analyze_btn:
+_auto_analyze = st.session_state.pop("_auto_analyze", False)
+if analyze_btn or _auto_analyze:
     corp_name = corp_input.strip()
     if not corp_name:
         st.warning("기업명을 입력하세요.")

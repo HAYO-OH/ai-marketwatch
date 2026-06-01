@@ -4,6 +4,7 @@ import streamlit as st
 
 from services.claude_client import ClaudeClient
 from services.tavily_client import TavilyClient
+from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="포트폴리오 리스크 대시보드", layout="wide")
 
@@ -24,20 +25,40 @@ def parse_portfolio(raw: str) -> list[dict]:
     return rows
 
 
+# ── 사이드바: 관심 종목 ───────────────────────────────────
+render_watchlist_sidebar()
+
+with st.sidebar:
+    _wl = st.session_state.get("watchlist", [])
+    if _wl:
+        st.subheader("포트폴리오 구성")
+        st.caption(f"관심 종목 {len(_wl)}개")
+        if st.button("포트폴리오에 불러오기", key="wl_to_portfolio", use_container_width=True):
+            n = len(_wl)
+            base_w = round(100 / n, 1)
+            last_w = round(100 - base_w * (n - 1), 1)
+            lines = [f"{s},{base_w}" for s in _wl[:-1]] + [f"{_wl[-1]},{last_w}"]
+            st.session_state["portfolio_raw_input"] = "\n".join(lines)
+            st.rerun()
+        st.divider()
+
 # ── 메인: 입력 폼 (중앙 배치) ────────────────────────────
 st.title("⚠️ 포트폴리오 리스크 대시보드")
 st.markdown("<br>", unsafe_allow_html=True)
 
+_default_portfolio = "삼성전자,30\nSK하이닉스,20\n현대차,15\n카카오,10\n셀트리온,25"
+if "portfolio_raw_input" not in st.session_state:
+    st.session_state["portfolio_raw_input"] = _default_portfolio
+
 _, center, _ = st.columns([1, 2, 1])
 with center:
     st.markdown("##### 포트폴리오 입력 (종목명,비중% 형식으로 입력)")
-    default_portfolio = "삼성전자,30\nSK하이닉스,20\n현대차,15\n카카오,10\n셀트리온,25"
     raw_input = st.text_area(
         "포트폴리오",
-        value=default_portfolio,
         height=180,
         label_visibility="collapsed",
         placeholder="삼성전자,30\nSK하이닉스,20\n현대차,15",
+        key="portfolio_raw_input",
     )
     st.markdown("<br>", unsafe_allow_html=True)
     analyze_btn = st.button(

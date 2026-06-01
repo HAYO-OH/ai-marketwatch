@@ -2,11 +2,15 @@ from datetime import date
 
 import streamlit as st
 
+from utils.watchlist import render_watchlist_sidebar
+
 st.set_page_config(
     page_title="AI MarketWatch",
     page_icon="📈",
     layout="wide",
 )
+
+render_watchlist_sidebar()
 
 st.title("📈 AI MarketWatch")
 st.markdown("DART 공시 모니터링 · 실적 발표 요약 · 포트폴리오 리스크 분석")
