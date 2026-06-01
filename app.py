@@ -49,12 +49,3 @@ else:
     st.caption("아직 조회된 데이터 없음 — DART 공시 모니터링 페이지에서 검색하세요.")
 
 st.divider()
-
-# ── 페이지 링크 ──────────────────────────────────────────
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.page_link("pages/1_DART공시모니터링.py", label="DART 공시 모니터링", icon="📋")
-with col2:
-    st.page_link("pages/2_실적발표요약.py", label="실적 발표 요약", icon="📊")
-with col3:
-    st.page_link("pages/3_포트폴리오리스크.py", label="포트폴리오 리스크", icon="⚠️")
