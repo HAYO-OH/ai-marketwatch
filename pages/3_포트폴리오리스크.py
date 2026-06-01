@@ -4,6 +4,7 @@ import streamlit as st
 
 from services.claude_client import ClaudeClient
 from services.tavily_client import TavilyClient
+from utils.nav import render_top_nav
 from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="포트폴리오 리스크 대시보드", layout="wide")
@@ -25,8 +26,9 @@ def parse_portfolio(raw: str) -> list[dict]:
     return rows
 
 
-# ── 사이드바: 관심 종목 ───────────────────────────────────
+# ── 사이드바: 관심 종목 + 상단 네비게이션 ─────────────────
 render_watchlist_sidebar()
+render_top_nav("pages/3_포트폴리오리스크.py")
 
 with st.sidebar:
     _wl = st.session_state.get("watchlist", [])

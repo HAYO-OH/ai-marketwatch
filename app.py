@@ -2,6 +2,7 @@ from datetime import date
 
 import streamlit as st
 
+from utils.nav import render_top_nav
 from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(
@@ -11,6 +12,7 @@ st.set_page_config(
 )
 
 render_watchlist_sidebar()
+render_top_nav("app.py")
 
 st.title("📈 AI MarketWatch")
 st.markdown("DART 공시 모니터링 · 실적 발표 요약 · 포트폴리오 리스크 분석")

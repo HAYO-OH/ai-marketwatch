@@ -6,3 +6,4 @@ pydantic-settings>=2.3.0
 pandas>=2.2.0
 plotly>=5.22.0
 pykrx>=1.0
+streamlit-option-menu>=0.3.13

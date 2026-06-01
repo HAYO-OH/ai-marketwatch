@@ -8,6 +8,7 @@ import streamlit as st
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
 from services.tavily_client import TavilyClient
+from utils.nav import render_top_nav
 from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="DART 공시 모니터링", layout="wide")
@@ -104,6 +105,7 @@ def _render_disclosure_card(row, show_corp: bool = False, with_summary: bool = F
 
 # ── 관심 종목 사이드바 ────────────────────────────────────
 render_watchlist_sidebar()
+render_top_nav("pages/1_DART공시모니터링.py")
 
 # ── 사이드바 ──────────────────────────────────────────────
 with st.sidebar:

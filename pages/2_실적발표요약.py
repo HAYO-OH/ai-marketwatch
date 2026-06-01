@@ -9,6 +9,7 @@ import streamlit as st
 from config.settings import settings
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
+from utils.nav import render_top_nav
 from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="실적 발표 요약", layout="wide")
@@ -371,8 +372,9 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, kind_df: pd.DataFrame, analy
         st.caption(note)
 
 
-# ── 사이드바: 관심 종목 ───────────────────────────────────
+# ── 사이드바: 관심 종목 + 상단 네비게이션 ─────────────────
 render_watchlist_sidebar()
+render_top_nav("pages/2_실적발표요약.py")
 
 with st.sidebar:
     _wl = st.session_state.get("watchlist", [])
