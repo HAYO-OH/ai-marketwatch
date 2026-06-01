@@ -18,11 +18,31 @@ st.set_page_config(page_title="실적 발표 요약", layout="wide")
 def _get_clients():
     return DartClient(), ClaudeClient()
 
+
+def _date_to_quarter(date_str: str) -> str:
+    """YYYYMMDD → '2025 4Q' 형태의 분기 키."""
+    _Q_KEYS = [
+        "2026 1Q", "2025 4Q", "2025 3Q", "2025 2Q", "2025 1Q",
+        "2024 4Q", "2024 3Q", "2024 2Q", "2024 1Q",
+    ]
+    try:
+        year = int(date_str[:4])
+        month = int(date_str[4:6])
+        q = "1Q" if month <= 3 else "2Q" if month <= 6 else "3Q" if month <= 9 else "4Q"
+        key = f"{year} {q}"
+        return key if key in _Q_KEYS else "2025 4Q"
+    except (ValueError, IndexError):
+        return "2025 4Q"
+
+
 # ── Tab 1 → Tab 2 선택 종목 자동 분석 ───────────────────
 if st.session_state.get("selected_stock"):
     _incoming = st.session_state.pop("selected_stock")
+    _incoming_date = st.session_state.pop("selected_date", "")
     st.session_state["earn_corp_input"] = _incoming
     st.session_state["_auto_analyze"] = True
+    if _incoming_date:
+        st.session_state["earn_quarter_sel"] = _date_to_quarter(_incoming_date)
 
 # ── 분기 정의 (2024 1Q ~ 2026 1Q) ─────────────────────────
 _QUARTERS: dict[str, tuple[date, date]] = {
