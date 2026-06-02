@@ -143,6 +143,29 @@ _CLASSIFY_SYSTEM = """당신은 한국 주식시장 공시 분류 전문가입�
 ]"""
 
 
+_HISTORY_ANALYSIS_SYSTEM = """당신은 한국 주식시장 실적 분석 전문가입니다.
+여러 분기의 실적 공시 원문(또는 공시명)을 읽고 각 분기의 핵심 수치와 어닝 서프라이즈를 추출하세요.
+원문이 없거나 정보가 부족한 경우 공시명 기반으로 최대한 추론하세요.
+
+## 출력 형식
+반드시 아래 JSON 배열만 반환하세요. 설명 없이 JSON만 출력합니다.
+[
+  {
+    "quarter": "분기명 (입력값과 동일하게)",
+    "sales_val": 조 단위 float 또는 null,
+    "op_profit_val": 조 단위 float 또는 null,
+    "op_profit_qoq": 전분기대비 % float (증가=양수, 감소=음수) 또는 null,
+    "surprise": "BEAT" | "MISS" | "IN_LINE" | "UNKNOWN"
+  }
+]
+
+## 수치 변환 규칙
+- 백만원 단위면 ÷ 1,000,000 → 조 단위
+- 억원 단위면 ÷ 10,000 → 조 단위
+- 수치 불명이면 null (임의 추측 금지)
+- surprise: 전분기/전년대비 크게 상회=BEAT, 하회=MISS, 부합=IN_LINE, 정보부족=UNKNOWN"""
+
+
 def _strip_code_fence(text: str) -> str:
     text = text.strip()
     match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
@@ -249,6 +272,32 @@ class ClaudeClient:
             return raw if isinstance(raw, dict) else _FALLBACK
         except (json.JSONDecodeError, KeyError):
             return _FALLBACK
+
+    def analyze_earnings_history(self, corp_name: str, quarters_data: list[dict]) -> list[dict]:
+        """여러 분기 실적 배치 분석.
+        quarters_data = [{quarter, report_nm, doc_text}, ...]
+        returns [{quarter, sales_val, op_profit_val, op_profit_qoq, surprise}, ...]"""
+        if not quarters_data:
+            return []
+        parts = []
+        for qd in quarters_data:
+            part = f"[{qd['quarter']}] 공시명: {qd.get('report_nm') or '없음'}"
+            text = (qd.get("doc_text") or "")[:1200]
+            if text:
+                part += f"\n원문(발췌):\n{text}"
+            parts.append(part)
+        user_msg = f"기업명: {corp_name}\n\n" + "\n\n---\n\n".join(parts)
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=2048,
+                system=[{"type": "text", "text": _HISTORY_ANALYSIS_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
 
     def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
         """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]

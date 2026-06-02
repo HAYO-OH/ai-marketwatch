@@ -393,6 +393,186 @@ def _render_earnings_calendar(cal_df: pd.DataFrame, kind_df: pd.DataFrame, analy
         st.caption(note)
 
 
+# ── 실적 히스토리 헬퍼 ───────────────────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_earnings_history(corp_name: str, n_quarters: int = 8) -> list[dict]:
+    """최근 n_quarters 분기 실적 공시 수집 + Claude 배치 분석.
+    반환: [{quarter, rcept_dt, report_nm, sales_val, op_profit_val, op_profit_qoq, surprise}]"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    dart  = DartClient()
+    claude = ClaudeClient()
+
+    company = dart.search_company(corp_name)
+    if company is None:
+        return []
+    corp_code = company["corp_code"]
+
+    today = date.today()
+    quarter_list = [
+        (k, s, e)
+        for k, (s, e) in list(_QUARTERS.items())[:n_quarters]
+        if e <= today + timedelta(days=30)
+    ]
+
+    # 1. 각 분기 공시 목록 조회
+    disc_items: list[dict] = []
+    for qkey, qstart, qend in quarter_list:
+        try:
+            items = dart.get_disclosures(
+                corp_code,
+                qstart.strftime("%Y%m%d"),
+                (qend + timedelta(days=120)).strftime("%Y%m%d"),
+                page_count=30,
+            )
+        except Exception:
+            items = []
+        best = None
+        for kw in _EARNINGS_KW:
+            for it in items:
+                if kw in it.get("report_nm", ""):
+                    best = it
+                    break
+            if best:
+                break
+        disc_items.append({
+            "quarter":   qkey,
+            "rcept_dt":  best.get("rcept_dt", "") if best else "",
+            "report_nm": best.get("report_nm", "") if best else "",
+            "rcept_no":  best.get("rcept_no", "") if best else "",
+            "doc_text":  "",
+        })
+
+    # 2. 원문 병렬 수집 (4 workers)
+    def _fetch_text(item: dict) -> tuple[str, str]:
+        if not item["rcept_no"]:
+            return item["quarter"], ""
+        try:
+            return item["quarter"], dart.get_document_text(item["rcept_no"], max_chars=1500)
+        except Exception:
+            return item["quarter"], ""
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        text_map: dict[str, str] = dict(pool.map(_fetch_text, disc_items))
+    for it in disc_items:
+        it["doc_text"] = text_map.get(it["quarter"], "")
+
+    # 3. Claude 배치 분석
+    analysis_map = {
+        a["quarter"]: a
+        for a in claude.analyze_earnings_history(corp_name, disc_items)
+    }
+
+    # 4. 머지
+    return [
+        {
+            "quarter":       it["quarter"],
+            "rcept_dt":      it["rcept_dt"],
+            "report_nm":     it["report_nm"],
+            "rcept_no":      it["rcept_no"],
+            "sales_val":     analysis_map.get(it["quarter"], {}).get("sales_val"),
+            "op_profit_val": analysis_map.get(it["quarter"], {}).get("op_profit_val"),
+            "op_profit_qoq": analysis_map.get(it["quarter"], {}).get("op_profit_qoq"),
+            "surprise":      analysis_map.get(it["quarter"], {}).get("surprise", "UNKNOWN"),
+        }
+        for it in disc_items
+    ]
+
+
+def _render_earnings_history_chart(history: list[dict], corp_name: str, current_quarter: str) -> None:
+    """8분기 실적 히스토리 차트 렌더링."""
+    if not history:
+        st.info("실적 히스토리 데이터를 가져올 수 없습니다.")
+        return
+
+    ordered   = list(reversed(history))          # 시간 순(오래된 → 최신)
+    quarters  = [h["quarter"]         for h in ordered]
+    sales_v   = [h.get("sales_val")   for h in ordered]
+    op_v      = [h.get("op_profit_val") for h in ordered]
+    qoq_v     = [h.get("op_profit_qoq") for h in ordered]
+    surprises = [h.get("surprise", "UNKNOWN") for h in ordered]
+
+    _BAR_COLOR = {
+        "BEAT":    "#22a355",
+        "MISS":    "#FF4B4B",
+        "IN_LINE": "#4A90D9",
+        "UNKNOWN": "#aaaaaa",
+    }
+    _BADGE = {"BEAT": "BEAT", "MISS": "MISS", "IN_LINE": "LINE", "UNKNOWN": "N/A"}
+
+    bar_colors  = [_BAR_COLOR.get(s, "#aaa") for s in surprises]
+    badge_texts = [_BADGE.get(s, "N/A")      for s in surprises]
+
+    fig = go.Figure()
+
+    # 매출액 bars
+    fig.add_trace(go.Bar(
+        name="매출액",
+        x=quarters, y=sales_v,
+        marker=dict(color="#B0C4DE", opacity=0.75),
+        yaxis="y1",
+        hovertemplate="<b>%{x}</b><br>매출액: %{y:.1f}조원<extra></extra>",
+    ))
+
+    # 영업이익 bars (BEAT/MISS 색상 + 배지 텍스트)
+    fig.add_trace(go.Bar(
+        name="영업이익",
+        x=quarters, y=op_v,
+        marker=dict(color=bar_colors, opacity=0.9),
+        text=badge_texts,
+        textposition="outside",
+        textfont=dict(size=9, color=bar_colors),
+        yaxis="y1",
+        hovertemplate="<b>%{x}</b><br>영업이익: %{y:.1f}조원<extra></extra>",
+    ))
+
+    # 영업이익 QoQ 라인 (오른쪽 축)
+    fig.add_trace(go.Scatter(
+        name="영업이익 QoQ%",
+        x=quarters, y=qoq_v,
+        mode="lines+markers",
+        line=dict(color="#FF8C00", width=2.5, dash="dot"),
+        marker=dict(size=8, color="#FF8C00", line=dict(width=1.5, color="white")),
+        yaxis="y2",
+        connectgaps=False,
+        hovertemplate="<b>%{x}</b><br>QoQ: %{y:+.1f}%<extra></extra>",
+    ))
+
+    # 현재 분기 배경 강조
+    if current_quarter in quarters:
+        ci = quarters.index(current_quarter)
+        fig.add_shape(
+            type="rect",
+            x0=ci - 0.45, x1=ci + 0.45, y0=0, y1=1,
+            xref="x", yref="paper",
+            fillcolor="rgba(255, 75, 75, 0.07)", line_width=0,
+        )
+
+    fig.update_layout(
+        title=dict(text=f"📊 {corp_name} 실적 히스토리 (최근 8분기)", font=dict(size=15)),
+        barmode="group",
+        xaxis=dict(title="분기", tickfont=dict(size=11)),
+        yaxis=dict(title="금액 (조원)", side="left", gridcolor="#f0f0f0"),
+        yaxis2=dict(
+            title="영업이익 QoQ (%)", side="right",
+            overlaying="y", showgrid=False,
+            zeroline=True, zerolinecolor="#cccccc",
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=420,
+        margin=dict(t=70, b=40, l=60, r=60),
+        plot_bgcolor="white", paper_bgcolor="white",
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "※ 영업이익 막대 색상: 초록=BEAT  빨강=MISS  파랑=IN-LINE  회색=N/A  |"
+        "  점선: 전분기 대비 영업이익 증감률  |  음영: 현재 분석 분기"
+    )
+
+
 # ── 사이드바: 관심 종목 + 상단 네비게이션 ─────────────────
 render_watchlist_sidebar()
 render_top_nav("pages/2_실적발표요약.py")
@@ -676,6 +856,16 @@ if st.session_state.get("earnings_result"):
             )
         except Exception as _e:
             st.warning(f"PDF 생성 실패: {_e}")
+
+    # ── 실적 히스토리 차트 ────────────────────────────────
+    st.divider()
+    st.markdown("#### 📊 실적 서프라이즈 히스토리")
+    with st.spinner("최근 8분기 실적 공시 수집 및 AI 분석 중... (최초 1회, 이후 1시간 캐시)"):
+        _history = _fetch_earnings_history(corp_full_name)
+    if _history:
+        _render_earnings_history_chart(_history, corp_full_name, quarter)
+    else:
+        st.info("실적 히스토리 데이터를 가져올 수 없습니다.")
 
 # ── 실적 공시 캘린더 (항상 표시) ────────────────────────
 st.divider()
