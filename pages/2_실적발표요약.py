@@ -10,6 +10,7 @@ from config.settings import settings
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
 from utils.nav import render_top_nav
+from utils.pdf_report import generate_earnings_pdf
 from utils.watchlist import render_watchlist_sidebar
 
 st.set_page_config(page_title="실적 발표 요약", layout="wide")
@@ -640,6 +641,7 @@ if st.session_state.get("earnings_result"):
         if len(ticker_items_list) > 1:
             with st.spinner("동종업계 주가 데이터 조회 중..."):
                 peer_df = _fetch_peer_performance(tuple(ticker_items_list), date.today().strftime("%Y%m%d"))
+            st.session_state["earn_peer_df"] = peer_df
             _render_peer_comparison(peer_df, corp_full_name)
         else:
             st.info("동종업계 종목코드를 찾을 수 없습니다.")
@@ -654,6 +656,26 @@ if st.session_state.get("earnings_result"):
                 mark = "**▶**" if it.get("rcept_no") == r["rcept_no"] else "   "
                 st.markdown(f"{mark} [{it['rcept_dt']}] [{it['report_nm']}]({url})")
             st.caption("**▶** 표시: 분석에 사용된 공시")
+
+    # ── PDF 다운로드 ────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    _pdf_col, _ = st.columns([1, 3])
+    with _pdf_col:
+        try:
+            _peer_df_for_pdf = st.session_state.get("earn_peer_df")
+            _pdf_bytes = generate_earnings_pdf(r, _peer_df_for_pdf)
+            _safe_corp  = r["corp_name"].replace(" ", "_")
+            _safe_qtr   = r["quarter"].replace(" ", "_")
+            _today_fname = date.today().strftime("%Y%m%d")
+            st.download_button(
+                label="📄 PDF 리포트 다운로드",
+                data=_pdf_bytes,
+                file_name=f"AI_MarketWatch_{_safe_corp}_{_safe_qtr}_{_today_fname}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception as _e:
+            st.warning(f"PDF 생성 실패: {_e}")
 
 # ── 실적 공시 캘린더 (항상 표시) ────────────────────────
 st.divider()
