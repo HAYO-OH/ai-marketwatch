@@ -28,10 +28,15 @@ _EARNINGS_ANALYSIS_SYSTEM = """당신은 한국 주식시장 실적 분석 전�
 원문이 없거나 정보가 불충분하면 공시명과 분기 정보로 추론 가능한 수준으로 작성하세요.
 
 ## 어닝 서프라이즈 판단 기준
-- BEAT: 영업이익/매출이 전분기 또는 전년 동기 대비 시장 예상을 크게 상회, 또는 긍정적 서프라이즈 언급
-- MISS: 영업이익/매출이 예상치 하회, 어닝 쇼크 또는 급감 언급
-- IN_LINE: 예상치 부합, 소폭 증감
-- UNKNOWN: 비교 기준 불명확하거나 원문 정보 부족
+컨센서스(시장 예상) 데이터가 제공된 경우 → 실제 수치와 컨센서스를 직접 비교해 판단하세요.
+컨센서스가 없는 경우 → 전년동기(YoY) 또는 전분기(QoQ) 성장률로 판단하세요.
+
+- BEAT: ① 컨센서스 있음: 실제값이 컨센서스 영업이익/매출을 5% 이상 상회
+         ② 컨센서스 없음: 영업이익 YoY +20% 초과 또는 원문에 "서프라이즈" 긍정 언급
+- MISS:  ① 컨센서스 있음: 실제값이 컨센서스 하회
+         ② 컨센서스 없음: 영업이익 YoY -10% 이하 또는 원문에 "쇼크" 부정 언급
+- IN_LINE: 컨센서스와 ±5% 이내, 또는 YoY ±10~20% 이내
+- UNKNOWN: 컨센서스도 없고 YoY/QoQ 비교 가능한 수치도 부족
 
 ## 출력 형식
 반드시 아래 JSON 객체만 반환하세요. 설명 없이 JSON만 출력합니다.
@@ -143,6 +148,80 @@ _CLASSIFY_SYSTEM = """당신은 한국 주식시장 공시 분류 전문가입�
 ]"""
 
 
+_MGMT_COMMENT_SYSTEM = """당신은 한국 주식시장 IR 분석 전문가입니다.
+실적발표 관련 뉴스/기사에서 경영진(CEO/CFO/대표이사/회장) 발언을 추출하세요.
+
+## 출력 형식
+반드시 아래 JSON만 반환하세요. 설명 없이 JSON만 출력합니다.
+{
+  "ceo_comment": "CEO/대표이사 핵심 발언 1~2문장. 없으면 null",
+  "ceo_speaker": "발언자 직함 또는 이름 (예: '대표이사', '이재용 회장'). 모르면 '대표이사'",
+  "cfo_comment": "CFO/재무담당 가이던스 발언 1~2문장. 없으면 null",
+  "cfo_speaker": "발언자 직함 또는 이름. 모르면 'CFO'",
+  "outlook_keywords": ["키워드1", "키워드2", "키워드3"],
+  "has_content": true 또는 false
+}
+
+## 규칙
+- 직접 인용구(따옴표)가 있으면 그대로 추출
+- 없으면 기사 내용 기반으로 발언 취지를 1~2문장으로 요약
+- outlook_keywords: 향후 전망 관련 핵심 키워드 최대 3개
+- 발언 정보가 전혀 없으면 has_content=false, 나머지 null"""
+
+
+_PORTFOLIO_REBALANCE_SYSTEM = """당신은 한국 주식시장 전문 포트폴리오 매니저입니다.
+포트폴리오 구성 데이터와 섹터 현황을 분석하여 리밸런싱을 제안하세요.
+
+## 출력 형식
+반드시 아래 JSON만 반환하세요. 설명 없이 JSON만 출력합니다.
+{
+  "overall_assessment": "전체 포트폴리오 평가 1~2문장",
+  "risk_level": "낮음" | "보통" | "높음",
+  "suggestions": [
+    {
+      "name": "종목명",
+      "action": "매도" | "매수" | "유지",
+      "reason": "사유 20자 이내",
+      "target_weight": 목표비중 float 또는 null
+    }
+  ],
+  "sector_comment": "섹터 균형 평가 1문장",
+  "key_risk": "가장 큰 리스크 요인 1문장"
+}
+
+## 분석 기준
+- 특정 섹터 50% 이상 집중 → 높음 리스크
+- 수익률 -10% 이하 종목 → 매도 검토
+- 수익률 +30% 이상 → 차익 실현 검토
+- 섹터 분산 권장 (3섹터 이상), 종목 수 5~15개 적정"""
+
+
+_ANALYST_REPORT_SYSTEM = """당신은 한국 주식시장 리서치 분석 전문가입니다.
+뉴스/기사에서 증권사 애널리스트 리포트 정보를 추출하세요.
+
+## 출력 형식
+반드시 아래 JSON만 반환하세요. 설명 없이 JSON만 출력합니다.
+{
+  "brokers": [
+    {
+      "name": "증권사명",
+      "opinion": "매수" | "중립" | "매도",
+      "target_price": 목표주가 int 또는 null,
+      "comment": "핵심 코멘트 25자 이내"
+    }
+  ],
+  "consensus_target": 컨센서스 평균 목표주가 int 또는 null,
+  "core_comment": "전체 리포트 핵심 요약 1~2문장",
+  "has_content": true 또는 false
+}
+
+## 규칙
+- brokers: 최대 3개 증권사만 추출
+- opinion 표준화: "매수"/"비중확대"/"Strong Buy" → "매수", "중립"/"보유"/"시장수익률"/"Neutral" → "중립", "매도"/"비중축소" → "매도"
+- consensus_target: 여러 목표주가가 있으면 평균, 단일이면 그 값, 없으면 null
+- 정보가 전혀 없으면 has_content=false, brokers=[], 나머지 null"""
+
+
 _HISTORY_ANALYSIS_SYSTEM = """당신은 한국 주식시장 실적 분석 전문가입니다.
 여러 분기의 실적 공시 원문(또는 공시명)을 읽고 각 분기의 핵심 수치와 어닝 서프라이즈를 추출하세요.
 원문이 없거나 정보가 부족한 경우 공시명 기반으로 최대한 추론하세요.
@@ -251,16 +330,41 @@ class ClaudeClient:
         except (json.JSONDecodeError, KeyError):
             return {"error": "응답 파싱 실패"}
 
-    def analyze_earnings(self, corp_name: str, quarter: str, report_name: str, text: str) -> dict:
-        """실적 공시 분석. {earnings_surprise, surprise_reason, key_metrics, key_changes, guidance, risks} 반환."""
+    def analyze_earnings(
+        self,
+        corp_name: str,
+        quarter: str,
+        report_name: str,
+        text: str,
+        consensus_text: str = "",
+    ) -> dict:
+        """실적 공시 분석. {earnings_surprise, surprise_reason, key_metrics, key_changes, guidance, risks} 반환.
+
+        Args:
+            corp_name: 기업명
+            quarter: 분기 (예: "2025 4Q")
+            report_name: 공시 보고서명
+            text: DART 공시 원문
+            consensus_text: Tavily 컨센서스 검색 결과. BEAT/MISS 판단에 활용.
+        """
         _FALLBACK = {
             "earnings_surprise": "UNKNOWN", "surprise_reason": "분석 실패",
             "key_metrics": [], "key_changes": [], "guidance": "정보 없음", "risks": [],
         }
+        _consensus_section = (
+            f"\n\n## 컨센서스 (시장 예상) — Tavily 검색 결과\n{consensus_text}"
+            if consensus_text.strip() else ""
+        )
         if text:
-            user_msg = f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}\n\n원문:\n{text}"
+            user_msg = (
+                f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}"
+                f"\n\n원문:\n{text}{_consensus_section}"
+            )
         else:
-            user_msg = f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}\n\n원문 없음 — 공시명 기반으로 추론"
+            user_msg = (
+                f"기업명: {corp_name}\n분기: {quarter}\n공시명: {report_name}"
+                f"\n\n원문 없음 — 공시명 기반으로 추론{_consensus_section}"
+            )
         response = self._client.messages.create(
             model=MODEL,
             max_tokens=1024,
@@ -271,6 +375,51 @@ class ClaudeClient:
             raw = json.loads(_strip_code_fence(response.content[0].text))
             return raw if isinstance(raw, dict) else _FALLBACK
         except (json.JSONDecodeError, KeyError):
+            return _FALLBACK
+
+    def extract_mgmt_comments(self, corp_name: str, quarter: str, articles_text: str) -> dict:
+        """Tavily 검색 결과에서 경영진 발언 추출.
+        반환: {ceo_comment, ceo_speaker, cfo_comment, cfo_speaker, outlook_keywords, has_content}"""
+        _FALLBACK = {
+            "ceo_comment": None, "ceo_speaker": "대표이사",
+            "cfo_comment": None, "cfo_speaker": "CFO",
+            "outlook_keywords": [], "has_content": False,
+        }
+        if not articles_text.strip():
+            return _FALLBACK
+        user_msg = f"기업명: {corp_name}\n분기: {quarter}\n\n뉴스/기사:\n{articles_text[:3000]}"
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=512,
+                system=[{"type": "text", "text": _MGMT_COMMENT_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, dict) else _FALLBACK
+        except Exception:
+            return _FALLBACK
+
+    def extract_analyst_report(self, corp_name: str, quarter: str, articles_text: str) -> dict:
+        """증권사 애널리스트 리포트 정보 추출.
+        반환: {has_content, brokers, consensus_target, core_comment}"""
+        _FALLBACK = {
+            "has_content": False, "brokers": [],
+            "consensus_target": None, "core_comment": None,
+        }
+        if not articles_text.strip():
+            return _FALLBACK
+        user_msg = f"기업명: {corp_name}\n분기: {quarter}\n\n뉴스/기사:\n{articles_text[:3000]}"
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=512,
+                system=[{"type": "text", "text": _ANALYST_REPORT_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, dict) else _FALLBACK
+        except Exception:
             return _FALLBACK
 
     def analyze_earnings_history(self, corp_name: str, quarters_data: list[dict]) -> list[dict]:
@@ -298,6 +447,33 @@ class ClaudeClient:
             return raw if isinstance(raw, list) else []
         except Exception:
             return []
+
+    def analyze_portfolio_rebalancing(self, portfolio_data: list[dict], sector_summary: dict) -> dict:
+        """포트폴리오 리밸런싱 AI 제안.
+        portfolio_data = [{name, sector, weight, return_pct, cur_price}, ...]
+        반환: {overall_assessment, risk_level, suggestions, sector_comment, key_risk}"""
+        _FALLBACK = {
+            "overall_assessment": "분석 실패",
+            "risk_level": "보통",
+            "suggestions": [],
+            "sector_comment": "",
+            "key_risk": "",
+        }
+        user_msg = (
+            f"포트폴리오:\n{json.dumps(portfolio_data, ensure_ascii=False)}\n\n"
+            f"섹터 집중도:\n{json.dumps(sector_summary, ensure_ascii=False)}"
+        )
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=1024,
+                system=[{"type": "text", "text": _PORTFOLIO_REBALANCE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw = json.loads(_strip_code_fence(response.content[0].text))
+            return raw if isinstance(raw, dict) else _FALLBACK
+        except Exception:
+            return _FALLBACK
 
     def classify_disclosures(self, corp_name: str, items: list[dict]) -> list[dict]:
         """공시 목록을 카테고리 분류 + 중요도 점수화. [{index, category, score, reason}, ...]

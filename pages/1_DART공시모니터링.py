@@ -3,11 +3,13 @@ from datetime import date
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from services.claude_client import ClaudeClient
 from services.dart_client import DartClient
 from services.tavily_client import TavilyClient
+from utils.logos import get_logo_html
 from utils.nav import render_top_nav
 from utils.watchlist import render_watchlist_sidebar
 
@@ -194,33 +196,31 @@ def _importance_bar_html(score: int) -> str:
 
 
 def _list_card_html(row: dict) -> str:
-    """공시 목록 탭 전용 카드 HTML."""
+    """공시 목록 탭 전용 카드 HTML (단일행 — 블록 배치용)."""
     cat      = row.get("카테고리", "기타")
     badge    = _CAT_BADGE.get(cat, "background:#e9ecef;color:#444")
     rcept_no = row.get("rcept_no", "")
-    dart_link = ""
+    score    = row.get("중요도", 1)
+    sc_color = "#FF4B4B" if score >= 9 else ("#FF8C00" if score >= 7 else "#bbb")
+    dart_icon = ""
     if rcept_no:
         durl = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
-        dart_link = (
-            f"<div style='margin-top:5px'>"
+        dart_icon = (
             f"<a href='{durl}' target='_blank' "
-            f"style='font-size:0.73rem;color:#bbb;text-decoration:none'>🔗 DART 원문</a></div>"
+            f"style='font-size:0.72rem;color:#ccc;text-decoration:none;"
+            f"flex-shrink:0;line-height:1'>↗</a>"
         )
     return (
-        "<div class='disc-list-card' style='background:white;border:1px solid #e8eaed;"
-        "border-radius:8px;padding:10px 14px;margin-bottom:1px'>"
-        + f"<div style='display:flex;justify-content:space-between;align-items:center;"
-          f"margin-bottom:4px'>"
-          f"<span style='font-size:0.76rem;color:#aaa'>{row.get('접수일', '')}</span>"
-          f"<span style='font-size:0.71rem;padding:2px 8px;border-radius:10px;"
-          f"font-weight:600;{badge}'>{cat}</span>"
-          f"</div>"
-        + f"<div style='font-size:0.91rem;font-weight:600;color:#222;margin-bottom:4px;"
-          f"line-height:1.35'>{row.get('보고서명', '')}</div>"
-        + f"<div style='margin-bottom:4px'>{_importance_bar_html(row.get('중요도', 1))}</div>"
-        + f"<div style='font-size:0.77rem;color:#777;line-height:1.45'>"
-          f"{row.get('분류사유', '')}</div>"
-        + dart_link
+        "<div style='display:flex;align-items:center;gap:6px;"
+        "padding:5px 10px;border-bottom:1px solid #f0f2f5;"
+        "background:white;line-height:1.3'>"
+        f"<span style='font-size:0.67rem;color:#bbb;min-width:58px;flex-shrink:0;white-space:nowrap'>{row.get('접수일','')}</span>"
+        f"<span style='font-size:0.66rem;padding:1px 5px;border-radius:4px;font-weight:600;flex-shrink:0;white-space:nowrap;{badge}'>{cat}</span>"
+        f"<span style='font-size:0.7rem;color:{sc_color};font-weight:700;min-width:14px;text-align:right;flex-shrink:0'>{score}</span>"
+        f"<span style='font-size:0.8rem;font-weight:600;color:#1a2744;flex:1;"
+        f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>{row.get('보고서명','')}</span>"
+        f"<span style='font-size:0.72rem;color:#ccc;flex-shrink:0;line-height:1'>📈</span>"
+        f"{dart_icon}"
         + "</div>"
     )
 
@@ -231,13 +231,6 @@ render_top_nav("pages/1_DART공시모니터링.py")
 
 # ── 사이드바 ──────────────────────────────────────────────
 with st.sidebar:
-    with st.expander("📌 중요도 기준표", expanded=False):
-        st.markdown("🔴 **9~10점**: 최대주주 변동, 대규모 유상증자(30%↑), 횡령·배임, 상장폐지 사유, 워크아웃·법정관리, 적대적 M&A")
-        st.markdown("🟠 **7~8점**: 대표이사 교체, 합병·분할·주식교환, 대규모 소송 패소, 어닝 서프라이즈(±20%↑), 자회사 대규모 매각·취득, 유상증자(10~30%), CB·BW 발행")
-        st.markdown("🟡 **5~6점**: 분기·반기·사업 실적 공시, 자사주 취득(1~5%), 특별배당, 신규 사업 진출, 대규모 시설투자, 주요 계약 체결")
-        st.markdown("🟢 **2~4점**: 소액 배당, 임원 변경(대표 제외), 자기주식 소각, 공시 정정(수치 오류), 감사보고서 제출")
-        st.markdown("⚪ **1점**: 단순 형식 정정, 기재사항 변경, 반복적 정기 공시")
-    st.divider()
     st.subheader("🗂️ 카테고리 설명")
     st.markdown("""
 - **실적** — 사업·분기·반기보고서, 영업실적
@@ -283,108 +276,92 @@ _QUARTERS = {
     "2025 1Q": (date(2025, 1, 1),  date(2025, 3, 31)),
 }
 
-# ── 메인: 검색 폼 ─────────────────────────────────────────
-st.title("📋 DART 공시 모니터링")
-st.markdown("<br>", unsafe_allow_html=True)
+# ── 전역 스타일 ──────────────────────────────────────────
+st.markdown(
+    "<style>"
+    "[data-testid='stAppViewContainer']{background:#f5f6fa}"
+    "[data-testid='stHeader']{background:#f5f6fa}"
+    "section[data-testid='stSidebar']{background:#fff}"
+    "div[data-testid='stButton'] button[kind='primary']"
+    "{background-color:#1a2744!important;border-color:#1a2744!important;color:#fff!important}"
+    "div[data-testid='stButton'] button[kind='primary']:hover"
+    "{background-color:#243560!important;border-color:#243560!important}"
+    "</style>",
+    unsafe_allow_html=True,
+)
 
-_, center, _ = st.columns([1, 2, 1])
-with center:
-    st.markdown("##### 관심 종목")
+# ── 메인: 헤더 배너 ──────────────────────────────────────
+st.markdown(
+    f"<div style='background:#1a2744;padding:9px 18px;border-radius:6px;"
+    f"margin-bottom:12px;display:flex;align-items:center;justify-content:space-between'>"
+    f"<div><span style='color:#fff;font-size:1.15rem;font-weight:700;letter-spacing:-0.3px'>"
+    f"DART 공시 모니터링</span>"
+    f"<span style='color:#7a8fbb;font-size:0.78rem;margin-left:12px'>"
+    f"AI 분류 · 중요도 점수화 · 감성 분석</span></div>"
+    f"<span style='color:#7a8fbb;font-size:0.78rem'>{date.today().strftime('%Y.%m.%d')}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
 
-    # 관심 종목 불러오기
-    _wl = st.session_state.get("watchlist", [])
-    if _wl and st.button("⭐ 관심 종목 불러오기", use_container_width=True, key="wl_load_corp"):
-        new_keys = list(range(len(_wl)))
-        st.session_state.corp_keys = new_keys
-        st.session_state.corp_counter = len(_wl)
-        for _i, _s in enumerate(_wl):
-            st.session_state[f"corp_input_{_i}"] = _s
-        st.rerun()
-
-    for key_id in list(st.session_state.corp_keys):
-        col_input, col_del = st.columns([5, 1])
-        with col_input:
-            st.text_input(
-                "종목",
-                key=f"corp_input_{key_id}",
-                placeholder="예: 삼성전자",
-                label_visibility="collapsed",
-            )
-        with col_del:
-            st.markdown("<div style='margin-top:4px'>", unsafe_allow_html=True)
-            if st.button(
-                "삭제",
-                key=f"del_{key_id}",
-                disabled=len(st.session_state.corp_keys) <= 1,
-                use_container_width=True,
-            ):
-                st.session_state.corp_keys.remove(key_id)
-                st.session_state.pop(f"corp_input_{key_id}", None)
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    if len(st.session_state.corp_keys) < 10:
-        if st.button("＋ 종목 추가", use_container_width=True):
-            st.session_state.corp_keys.append(st.session_state.corp_counter)
-            st.session_state.corp_counter += 1
-            st.rerun()
-
-    st.markdown("##### 조회 기간")
-
-    # 분기 선택 버튼
-    q_cols = st.columns(len(_QUARTERS))
-    for col, q_label in zip(q_cols, _QUARTERS):
-        with col:
-            is_sel = st.session_state.selected_quarter == q_label
-            if st.button(
-                q_label,
-                key=f"qbtn_{q_label.replace(' ', '')}",
-                type="primary" if is_sel else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state.selected_quarter = q_label
-                st.session_state.manual_date_toggle = False
-                st.rerun()
-
-    # 직접 입력 토글
-    manual_mode = st.toggle("직접 입력", key="manual_date_toggle")
-    sel_start, sel_end = _QUARTERS[st.session_state.selected_quarter]
-
-    if manual_mode:
-        d1, d2 = st.columns(2)
-        with d1:
-            bgn_de = st.date_input("시작일", value=sel_start)
-        with d2:
-            end_de = st.date_input("종료일", value=sel_end)
-    else:
-        bgn_de, end_de = sel_start, sel_end
-        st.caption(f"📅 {bgn_de.strftime('%Y.%m.%d')} ~ {end_de.strftime('%Y.%m.%d')}")
-
-    st.markdown("##### 최소 중요도")
+# ── 메인: 컴팩트 검색 바 (Bloomberg 스타일) ──────────────
+_b1, _b2, _b3, _b4 = st.columns([5, 2, 2, 1])
+with _b1:
+    st.text_input(
+        "종목",
+        key="corp_input_single",
+        placeholder="기업명 (쉼표 구분: 삼성전자, SK하이닉스)",
+        label_visibility="collapsed",
+    )
+with _b2:
+    _q_list = list(_QUARTERS.keys())
+    _q_cur  = st.session_state.get("selected_quarter", _q_list[0])
+    _q_idx  = _q_list.index(_q_cur) if _q_cur in _q_list else 0
+    _sel_q  = st.selectbox(
+        "분기",
+        options=_q_list,
+        index=_q_idx,
+        label_visibility="collapsed",
+        key="qselect",
+    )
+    st.session_state["selected_quarter"] = _sel_q
+with _b3:
     min_score = st.slider(
         "최소 중요도",
         min_value=1, max_value=10, value=1,
         label_visibility="collapsed",
     )
-    st.markdown("<br>", unsafe_allow_html=True)
+with _b4:
     search_btn = st.button(
-        "🔍 조회 + AI 분류",
+        "🔍 조회",
         type="primary",
         use_container_width=True,
     )
+
+# 보조 행: 날짜 범위 + 관심종목 불러오기
+sel_start, sel_end = _QUARTERS[_sel_q]
+bgn_de, end_de = sel_start, sel_end
+_wl = st.session_state.get("watchlist", [])
+_wa, _wb = st.columns([7, 2])
+with _wa:
+    st.caption(
+        f"📅 {bgn_de.strftime('%Y.%m.%d')} ~ {end_de.strftime('%Y.%m.%d')}"
+        f"  ·  최소 중요도 {min_score}점 이상"
+    )
+with _wb:
+    if _wl and st.button("⭐ 관심종목 불러오기", use_container_width=True, key="wl_load_corp"):
+        st.session_state["corp_input_single"] = ", ".join(_wl)
+        st.rerun()
 
 # st.tabs 위치를 항상 고정하기 위해 with center: 블록 밖에 배치
 progress_slot = st.empty()
 
 if search_btn:
-    corp_names = [
-        st.session_state.get(f"corp_input_{k}", "").strip()
-        for k in st.session_state.corp_keys
-        if st.session_state.get(f"corp_input_{k}", "").strip()
-    ]
+    _raw_input = st.session_state.get("corp_input_single", "")
+    corp_names = [n.strip() for n in _raw_input.replace("，", ",").split(",") if n.strip()]
     if not corp_names:
         st.warning("기업명을 입력하세요.")
         st.stop()
+    st.session_state["recent_corp_names"] = corp_names
 
     dart = DartClient()
     claude = ClaudeClient()
@@ -515,6 +492,23 @@ if search_btn:
     }
 
 if st.session_state.search_results is None:
+    _recent = st.session_state.get("recent_corp_names", [])
+    if _recent:
+        st.markdown(
+            "<div style='padding:14px 4px;font-size:0.82rem;color:#888'>"
+            "최근 조회:&nbsp;&nbsp;"
+            + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(
+                f"<b style='color:#1a2744'>{c}</b>" for c in _recent
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div style='text-align:center;padding:48px 20px;color:#ccc;font-size:0.88rem'>"
+            "기업명을 입력하고 🔍 조회 버튼을 누르면 공시 목록이 여기에 표시됩니다.</div>",
+            unsafe_allow_html=True,
+        )
     st.stop()
 
 _r = st.session_state.search_results
@@ -583,18 +577,29 @@ for _res in company_results:
         if _anom:
             _corp_anomalies[_res["corp_name"]] = _anom
 
-# ── 탭 ───────────────────────────────────────────────────
-tab_list, tab_monitor, tab_chart, tab_sentiment, tab_alert = st.tabs([
-    "📄 공시 목록", "📋 일괄 모니터링", "📊 분석 차트", "📰 뉴스 감성", "🚨 주요 공시"
+# ── Bloomberg 요약 헤더 ───────────────────────────────────
+if not df_all.empty:
+    _hi   = int((df_all["중요도"] >= 7).sum())
+    _corps = " · ".join(r["corp_name"] for r in company_results if r["found"])[:70]
+    st.markdown(
+        f"<div style='background:#1a2744;padding:7px 15px;border-radius:6px;"
+        f"margin-bottom:8px;display:flex;align-items:center;justify-content:space-between'>"
+        f"<span style='color:#fff;font-size:0.88rem;font-weight:600'>{_corps}</span>"
+        f"<span style='color:#7a8fbb;font-size:0.77rem'>"
+        f"공시 {len(df_all)}건 &nbsp;·&nbsp; 핵심 {_hi}건</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+# ── 탭 (3개) ─────────────────────────────────────────────
+tab_list, tab_chart, tab_alert = st.tabs([
+    "📋 공시목록", "📊 분석차트", "🔔 알림설정"
 ])
 
 # ── Tab 1: 공시 목록 ──────────────────────────────────────
 with tab_list:
     st.markdown(
         "<style>"
-        ".disc-list-card{transition:transform .15s ease,box-shadow .15s ease}"
-        ".disc-list-card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.07)}"
-        ".element-container:has(.disc-list-card){margin-bottom:-10px}"
         "div[data-testid='stRadio']>div{gap:4px;flex-wrap:wrap}"
         "div[data-testid='stRadio'] label{border:1px solid #e0e0e0;border-radius:16px;"
         "padding:3px 13px;font-size:0.82rem;cursor:pointer}"
@@ -603,19 +608,6 @@ with tab_list:
         "</style>",
         unsafe_allow_html=True,
     )
-
-    # ── 전체 요약 배너
-    if not df_all.empty:
-        _high_cnt = int((df_all["중요도"] >= 7).sum())
-        _cat_vc   = df_all["카테고리"].value_counts()
-        _cat_str  = "  ·  ".join(f"{k} {v}건" for k, v in _cat_vc.head(5).items())
-        st.markdown(
-            f"<div style='background:#f0f4ff;border:1px solid #d0d9ff;border-radius:8px;"
-            f"padding:10px 16px;margin-bottom:8px;font-size:0.85rem'>"
-            f"⚡&nbsp;<strong>핵심 공시 {_high_cnt}건 / 전체 {len(df_all)}건</strong>"
-            f"&nbsp;&nbsp;<span style='color:#888'>{_cat_str}</span></div>",
-            unsafe_allow_html=True,
-        )
 
     # ── 이상 감지 배너
     if _corp_anomalies:
@@ -635,15 +627,27 @@ with tab_list:
         _banner += "</div>"
         st.markdown(_banner, unsafe_allow_html=True)
 
-    # ── 필터 바
-    _FILTER_CATS = ["전체", "실적", "자사주", "지배구조", "정정"]
-    _cat_filter = st.radio(
-        "카테고리 필터",
-        options=_FILTER_CATS,
-        horizontal=True,
-        label_visibility="collapsed",
-        key="list_cat_filter",
-    )
+    # ── 필터 바 + 요약 (한 줄)
+    _fb_l, _fb_r = st.columns([2, 5])
+    with _fb_l:
+        if not df_all.empty:
+            _high_cnt = int((df_all["중요도"] >= 7).sum())
+            st.markdown(
+                f"<div style='padding:7px 0;font-size:0.78rem;color:#555'>"
+                f"⚡ 핵심 <b style='color:#1a2744'>{_high_cnt}</b>건 표시 중"
+                f"<span style='color:#aaa;font-size:0.73rem;margin-left:5px'>(전체 {len(df_all)}건)</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    with _fb_r:
+        _FILTER_CATS = ["전체", "실적", "자사주", "지배구조", "정정"]
+        _cat_filter = st.radio(
+            "카테고리 필터",
+            options=_FILTER_CATS,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="list_cat_filter",
+        )
 
     # ── 기업별 카드
     for result in company_results:
@@ -676,10 +680,18 @@ with tab_list:
         # 기업 헤더
         _hdr_l, _hdr_r = st.columns([3, 1])
         with _hdr_l:
-            _badge_str = "  ".join(a["label"] for a in _anom) if _anom else ""
-            st.subheader(f"{corp_name}{'   ' + _badge_str if _badge_str else ''}")
+            _badge_html = "".join(
+                f"<span style='font-size:0.72rem;background:#fff3cd;color:#856404;"
+                f"border-radius:3px;padding:2px 7px;font-weight:600;margin-left:6px'>"
+                f"{a['label']}</span>"
+                for a in _anom
+            )
             st.markdown(
-                f"<div style='font-size:0.81rem;color:#555;margin-top:-12px;margin-bottom:4px'>"
+                f"<div style='display:flex;align-items:center;margin-bottom:2px;margin-top:6px'>"
+                f"{get_logo_html(corp_name, 28)}"
+                f"<span style='font-size:1.25rem;font-weight:700;color:#1a2744'>{corp_name}</span>"
+                f"{_badge_html}</div>"
+                f"<div style='font-size:0.81rem;color:#555;margin-bottom:4px'>"
                 f"⚡ 핵심 공시 <strong>{len(_high_rows)}건</strong> / 전체 {len(_rows)}건</div>",
                 unsafe_allow_html=True,
             )
@@ -689,65 +701,51 @@ with tab_list:
         # 표시할 행 결정
         _display = _rows if _show_all else (_high_rows if _high_rows else _rows[:5])
 
-        for _ci, row in enumerate(_display):
-            st.markdown(_list_card_html(row), unsafe_allow_html=True)
-            _, _rc = st.columns([6, 1])
-            with _rc:
-                _corp = row.get("기업명", "")
-                if _corp:
-                    if st.button("📈 주가", key=f"lc_{corp_name}_{_ci}", use_container_width=True):
-                        st.session_state["selected_stock"] = _corp
-                        st.session_state["selected_date"]  = row.get("접수일", "")
-                        st.switch_page("pages/2_실적발표요약.py")
+        _cards_html = "".join(_list_card_html(row) for row in _display)
+        st.markdown(
+            f"<div style='border:1px solid #e2e5ea;border-left:3px solid #1a2744;"
+            f"border-radius:4px;overflow:hidden;margin-bottom:8px'>"
+            f"{_cards_html}</div>",
+            unsafe_allow_html=True,
+        )
 
-        if not _show_all and _low_rows:
-            st.caption(f"  7점 미만 {len(_low_rows)}건 숨김 — 토글로 전체 보기")
+# ── Tab 2: 분석차트 (차트 + 뉴스 감성 통합) ──────────────
+_CAT_COLOR: dict[str, str] = {
+    "실적":     "#22a355",
+    "자사주":   "#2563eb",
+    "유상증자": "#8b5cf6",
+    "배당":     "#f59e0b",
+    "지배구조": "#f0a500",
+    "소송":     "#ef4444",
+    "공시정정": "#dc2626",
+    "인사":     "#6366f1",
+    "투자":     "#0891b2",
+    "기타":     "#6b7280",
+}
+_FONT = "Pretendard, -apple-system, BlinkMacSystemFont, sans-serif"
 
-# ── Tab 2: 일괄 모니터링 ──────────────────────────────────
-with tab_monitor:
-    for result in company_results:
-        with st.container(border=True):
-            corp_name = result["corp_name"]
-
-            if not result["found"]:
-                st.markdown(f"### ❓ {corp_name}")
-                st.warning("DART에서 해당 기업을 찾을 수 없습니다.")
-                continue
-
-            top_score = result["top_score"]
-            hdr, badge_col = st.columns([4, 1])
-            with hdr:
-                _anom_mon = _corp_anomalies.get(corp_name, [])
-                if _anom_mon:
-                    st.markdown(f"### {corp_name}  " + "  ".join(a["label"] for a in _anom_mon))
-                else:
-                    st.markdown(f"### {corp_name}")
-            with badge_col:
-                if top_score > 0:
-                    st.markdown(f"**최고점** {score_badge(top_score)}")
-                else:
-                    st.markdown("**최고점** —")
-
-            if not result["top3"]:
-                st.info(f"해당 기간 중요도 {min_score}점 이상 공시 없음")
-                continue
-
-            for disc in result["top3"]:
-                _render_disclosure_card(disc, _tab_ctx="mon")
-
-# ── Tab 3: 분석 차트 ──────────────────────────────────────
 with tab_chart:
+    # 중요도 기준표 (사이드바에서 이동)
+    with st.expander("📌 중요도 기준표", expanded=False):
+        st.markdown(
+            "| 점수 | 등급 | 대표 공시 유형 |\n"
+            "|:---:|:---:|---|\n"
+            "| 🔴 **9~10** | 최고 | 최대주주 변동, 유상증자 30%↑, 횡령·배임, 상장폐지 사유, 워크아웃·법정관리 |\n"
+            "| 🟠 **7~8** | 높음 | 대표이사 교체, 합병·분할·주식교환, 대규모 소송 패소, 어닝 서프라이즈 ±20%↑, 유상증자 10~30% |\n"
+            "| 🟡 **5~6** | 보통 | 분기·반기·사업 실적 공시, 자사주 취득 1~5%, 특별배당, 신규 사업 진출, 대규모 계약 |\n"
+            "| 🟢 **2~4** | 낮음 | 소액 배당, 임원 변경(대표 제외), 자기주식 소각, 감사보고서 제출 |\n"
+            "| ⚪ **1** | 최저 | 단순 형식 정정, 기재사항 변경, 반복적 정기 공시 |"
+        )
+
     if df_all.empty:
         st.info("차트를 표시할 공시 데이터가 없습니다.")
     else:
         available_corps = sorted(df_all["기업명"].unique().tolist())
-        chart_options = ["전체"] + available_corps
         selected_corp = st.selectbox(
             "기업 선택",
-            options=chart_options,
+            options=["전체"] + available_corps,
             key="chart_corp_select",
         )
-
         if selected_corp == "전체":
             df_chart = df_all
             label = "전체 기업"
@@ -756,41 +754,99 @@ with tab_chart:
             label = selected_corp
 
         c1, c2 = st.columns(2)
+
+        # ── 카테고리별 공시 건수 ─────────────────────────────
         with c1:
             cat_counts = df_chart["카테고리"].value_counts().reset_index()
             cat_counts.columns = ["카테고리", "건수"]
-            fig_cat = px.bar(
-                cat_counts, x="건수", y="카테고리", orientation="h",
-                title=f"카테고리별 공시 건수 — {label}",
-                color="건수", color_continuous_scale="Blues",
+            bar_colors = [
+                _CAT_COLOR.get(c, "#6b7280") for c in cat_counts["카테고리"]
+            ]
+            fig_cat = go.Figure(go.Bar(
+                x=cat_counts["건수"],
+                y=cat_counts["카테고리"],
+                orientation="h",
+                marker_color=bar_colors,
+                text=cat_counts["건수"],
+                textposition="outside",
+                textfont=dict(size=12, family=_FONT),
+            ))
+            fig_cat.update_layout(
+                title=dict(text=f"카테고리별 공시 건수 — {label}", font=dict(size=14, family=_FONT)),
+                xaxis=dict(title="건수", tickfont=dict(family=_FONT)),
+                yaxis=dict(title="", tickfont=dict(family=_FONT, size=12)),
+                font=dict(family=_FONT),
+                showlegend=False,
+                margin=dict(l=10, r=50, t=45, b=10),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
             )
-            fig_cat.update_layout(showlegend=False, coloraxis_showscale=False)
             st.plotly_chart(fig_cat, use_container_width=True)
 
+        # ── 중요도 분포 ──────────────────────────────────────
         with c2:
-            fig_hist = px.histogram(
-                df_chart, x="중요도", nbins=10,
-                title=f"중요도 분포 — {label}",
-                range_x=[0.5, 10.5],
-                color_discrete_sequence=["#4A90D9"],
+            x_vals = list(range(1, 11))
+            score_cnt = df_chart["중요도"].value_counts()
+            y_vals = [int(score_cnt.get(s, 0)) for s in x_vals]
+            # 높은 점수일수록 진한 네이비
+            dist_colors = [
+                f"rgba(26,39,68,{0.12 + i * 0.088:.2f})" for i in range(10)
+            ]
+            fig_dist = go.Figure(go.Bar(
+                x=x_vals,
+                y=y_vals,
+                text=y_vals,
+                textposition="outside",
+                textfont=dict(size=12, family=_FONT),
+                marker_color=dist_colors,
+                marker_line=dict(width=0),
+            ))
+            fig_dist.update_layout(
+                title=dict(text=f"중요도 분포 — {label}", font=dict(size=14, family=_FONT)),
+                xaxis=dict(
+                    title="중요도 (1~10)",
+                    tickmode="array",
+                    tickvals=x_vals,
+                    ticktext=[str(v) for v in x_vals],
+                    tickfont=dict(family=_FONT),
+                ),
+                yaxis=dict(title="건수", tickfont=dict(family=_FONT), rangemode="tozero"),
+                font=dict(family=_FONT),
+                bargap=0.25,
+                margin=dict(l=10, r=20, t=45, b=10),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
             )
-            fig_hist.update_layout(bargap=0.1)
-            st.plotly_chart(fig_hist, use_container_width=True)
+            st.plotly_chart(fig_dist, use_container_width=True)
 
+        # ── 카테고리별 평균 중요도 ──────────────────────────
         cat_score = df_chart.groupby("카테고리")["중요도"].mean().reset_index()
         cat_score.columns = ["카테고리", "평균중요도"]
         cat_score = cat_score.sort_values("평균중요도", ascending=False)
-        fig_avg = px.bar(
-            cat_score, x="카테고리", y="평균중요도",
-            title=f"카테고리별 평균 중요도 — {label}",
-            color="평균중요도", color_continuous_scale="Reds",
-            range_y=[0, 10],
+        avg_colors = [_CAT_COLOR.get(c, "#6b7280") for c in cat_score["카테고리"]]
+        fig_avg = go.Figure(go.Bar(
+            x=cat_score["카테고리"],
+            y=cat_score["평균중요도"],
+            marker_color=avg_colors,
+            text=[f"{v:.1f}" for v in cat_score["평균중요도"]],
+            textposition="outside",
+            textfont=dict(size=12, family=_FONT),
+        ))
+        fig_avg.update_layout(
+            title=dict(text=f"카테고리별 평균 중요도 — {label}", font=dict(size=14, family=_FONT)),
+            xaxis=dict(title="카테고리", tickfont=dict(family=_FONT, size=12)),
+            yaxis=dict(title="평균 중요도", range=[0, 11], tickfont=dict(family=_FONT)),
+            font=dict(family=_FONT),
+            showlegend=False,
+            margin=dict(l=10, r=20, t=45, b=10),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
         )
-        fig_avg.update_layout(coloraxis_showscale=False)
         st.plotly_chart(fig_avg, use_container_width=True)
 
-# ── Tab 4: 뉴스 감성 ──────────────────────────────────────
-with tab_sentiment:
+    # ── 뉴스 감성 (분석차트 탭 하단 통합) ─────────────────
+    st.divider()
+    st.markdown("**📰 뉴스 감성 점수 트렌드**")
     with st.expander("❓ 감성 점수란?", expanded=False):
         st.markdown("AI가 뉴스 기사를 읽고 투자자 관점에서 긍정/부정 정도를 **-5~+5**로 수치화한 지표입니다. +5에 가까울수록 긍정적 뉴스, -5에 가까울수록 부정적 뉴스가 많다는 의미입니다.")
         st.markdown("""
@@ -866,7 +922,7 @@ with tab_sentiment:
                 unsafe_allow_html=True,
             )
 
-# ── Tab 5: 주요 공시 ──────────────────────────────────────
+# ── Tab 3: 알림설정 (주요공시 + 원문 모니터링 통합) ──────
 with tab_alert:
     if not company_results or all(not r["found"] for r in company_results):
         st.info("조회된 공시가 없습니다.")
@@ -875,7 +931,13 @@ with tab_alert:
             if not result["found"]:
                 continue
             with st.container(border=True):
-                st.markdown(f"### {result['corp_name']}")
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;margin-bottom:4px'>"
+                    f"{get_logo_html(result['corp_name'], 26)}"
+                    f"<span style='font-size:1.15rem;font-weight:700;color:#1a2744'>"
+                    f"{result['corp_name']}</span></div>",
+                    unsafe_allow_html=True,
+                )
                 rows = result["all_rows"]
                 if not rows:
                     st.info("해당 기간 조회된 공시가 없습니다.")
@@ -891,3 +953,25 @@ with tab_alert:
                         st.markdown("**점수 상위 공시**")
                         for row in top3:
                             _render_disclosure_card(row, _tab_ctx="alt_t")
+
+    # ── 원문 모니터링 (알림설정 탭 하단) ──────────────────
+    st.divider()
+    st.markdown("**📋 공시 원문 모니터링 (핵심 3건)**")
+    for result in company_results:
+        if not result["found"] or not result.get("top3"):
+            continue
+        with st.container(border=True):
+            corp_name = result["corp_name"]
+            _anom_mon = _corp_anomalies.get(corp_name, [])
+            _hdr_txt = corp_name
+            if _anom_mon:
+                _hdr_txt += "  " + "  ".join(a["label"] for a in _anom_mon)
+            _mh, _mb = st.columns([4, 1])
+            with _mh:
+                st.markdown(f"**{_hdr_txt}**")
+            with _mb:
+                ts = result["top_score"]
+                if ts > 0:
+                    st.markdown(f"최고점 {score_badge(ts)}", unsafe_allow_html=True)
+            for disc in result["top3"]:
+                _render_disclosure_card(disc, _tab_ctx="mon")
